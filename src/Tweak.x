@@ -26,6 +26,7 @@ static inline struct FP FloatToFP(float value) {
     return fp;
 }
 
+static inline float FPToFloat(struct FP value) __attribute__((unused));
 static inline float FPToFloat(struct FP value) {
     return (float)value._serializedValue / 4294967296.0f;
 }
