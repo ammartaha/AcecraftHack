@@ -1,0 +1,21 @@
+# Binary Artifacts
+*.ipa
+*.deb
+*.dylib
+*.zip
+
+# Tools and Dumps
+tools/
+extracted/
+dump.cs
+*.dat
+
+# System
+.DS_Store
+Thumbs.db
+
+# Theos/Build
+.theos/
+obj/
+_
+packages/

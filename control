@@ -1,0 +1,9 @@
+Package: com.antigravity.acecrafthack
+Name: Acecraft Hack
+Depends: mobilesubstrate
+Version: 0.0.1
+Architecture: iphoneos-arm
+Description: God Mode, One Hit Kill, XP Multiplier for Acecraft
+Maintainer: Antigravity
+Author: Antigravity
+Section: Tweaks
