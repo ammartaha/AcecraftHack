@@ -1,159 +1,289 @@
 #import <UIKit/UIKit.h>
-#import "Utils.h"
-#import <CydiaSubstrate.h>
+#import <mach-o/dyld.h>
+#import <dlfcn.h>
+#import <CydiaSubstrate/CydiaSubstrate.h>
 
-// --- Global Toggles ---
+// ============================================================================
+// GLOBAL TOGGLES
+// ============================================================================
 static BOOL isGodMode = NO;
 static BOOL isOneHit = NO;
 static int xpMultiplier = 1;
-static UIButton *menuButton = nil;
 
-// --- Interfaces for Il2Cpp Classes ---
-// Defined based on dump.cs
-
-struct BulletData_BB {
-    // We need to match the struct layout exactly or access by offset if fields are private
-    // For now, casting strict pointers.
-    // offsets based on dump.cs
-    // 0x18 string PrefabName
-    // 0x58 SpawnGroup Parent
-    // 0x88 FP MaxHP
+// ============================================================================
+// FIXED POINT STRUCT (from dump.cs)
+// ============================================================================
+struct FP {
+    int64_t _serializedValue;
 };
 
-@interface Bullet : NSObject
-- (void)SetHp:(struct FP)hp;
-- (void)InitInfo:(void *)bulletData; // bulletData is BulletData_BB*
-@end
+// ============================================================================
+// ORIGINAL FUNCTION POINTERS
+// ============================================================================
+static void (*orig_Player_Hit)(void *self);
+static void (*orig_Bullet_SetHp)(void *self, struct FP hp);
 
-@interface MonoBehaviour : NSObject
-@end
-
-// --- UI Helper ---
-// --- Menu Handler ---
-@interface MenuHandler : NSObject
-+ (instancetype)sharedInstance;
-- (void)showMenu;
-@end
-
-@implementation MenuHandler
-
-+ (instancetype)sharedInstance {
-    static MenuHandler *sharedInstance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        sharedInstance = [[MenuHandler alloc] init];
-    });
-    return sharedInstance;
+// ============================================================================
+// HOOK: Player.Hit() - RVA: 0x453E3C
+// Called when player takes damage
+// ============================================================================
+void hook_Player_Hit(void *self) {
+    NSLog(@"[AcecraftHack] Player.Hit() called! GodMode=%d", isGodMode);
+    if (isGodMode) {
+        NSLog(@"[AcecraftHack] BLOCKED damage (God Mode ON)");
+        return; // Don't call original = no damage
+    }
+    orig_Player_Hit(self);
 }
 
-- (void)handleTap:(UITapGestureRecognizer *)sender {
+// ============================================================================
+// HOOK: Bullet.SetHp() - RVA: 0x4530C8
+// Called when any bullet/entity HP changes
+// ============================================================================
+void hook_Bullet_SetHp(void *self, struct FP hp) {
+    NSLog(@"[AcecraftHack] Bullet.SetHp() called! HP=%lld OneHit=%d", hp._serializedValue, isOneHit);
+    if (isOneHit) {
+        // Set HP to 0 = instant kill
+        struct FP zeroHp = {0};
+        orig_Bullet_SetHp(self, zeroHp);
+        return;
+    }
+    orig_Bullet_SetHp(self, hp);
+}
+
+// ============================================================================
+// GET UNITYFRAMEWORK BASE ADDRESS
+// ============================================================================
+static uintptr_t getUnityFrameworkBase() {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (strstr(name, "UnityFramework")) {
+            return (uintptr_t)_dyld_get_image_header(i);
+        }
+    }
+    return 0;
+}
+
+// ============================================================================
+// SETUP NATIVE HOOKS
+// ============================================================================
+void setupNativeHooks() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        uintptr_t base = getUnityFrameworkBase();
+        if (!base) {
+            NSLog(@"[AcecraftHack] ERROR: UnityFramework not found!");
+            return;
+        }
+        NSLog(@"[AcecraftHack] UnityFramework base: 0x%lx", base);
+        
+        // Hook Player.Hit
+        void *hitAddr = (void *)(base + 0x453E3C);
+        MSHookFunction(hitAddr, (void *)hook_Player_Hit, (void **)&orig_Player_Hit);
+        NSLog(@"[AcecraftHack] Hooked Player.Hit at %p", hitAddr);
+        
+        // Hook Bullet.SetHp
+        void *setHpAddr = (void *)(base + 0x4530C8);
+        MSHookFunction(setHpAddr, (void *)hook_Bullet_SetHp, (void **)&orig_Bullet_SetHp);
+        NSLog(@"[AcecraftHack] Hooked Bullet.SetHp at %p", setHpAddr);
+    });
+}
+
+// ============================================================================
+// UI: FLOATING BUTTON & MENU
+// ============================================================================
+static UIButton *floatingButton = nil;
+static UIView *menuView = nil;
+static UIView *overlayView = nil;
+
+@interface ModMenuController : NSObject
++ (instancetype)shared;
+- (void)showMenu;
+- (void)hideMenu;
+- (void)handleButtonTap:(UITapGestureRecognizer *)gesture;
+- (void)handleButtonDrag:(UIPanGestureRecognizer *)gesture;
+@end
+
+@implementation ModMenuController
+
++ (instancetype)shared {
+    static ModMenuController *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[ModMenuController alloc] init];
+    });
+    return instance;
+}
+
+- (void)handleButtonTap:(UITapGestureRecognizer *)gesture {
     [self showMenu];
 }
 
-- (void)showMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Mod Menu"
-                                                                   message:@"By Antigravity"
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-
-    // God Mode Toggle
-    NSString *godTitle = isGodMode ? @"[ON] God Mode" : @"[OFF] God Mode";
-    [alert addAction:[UIAlertAction actionWithTitle:godTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        isGodMode = !isGodMode;
-        [self showMenu];
-    }]];
-
-    // One Hit Kill Toggle
-    NSString *ohkTitle = isOneHit ? @"[ON] One Hit Kill" : @"[OFF] One Hit Kill";
-    [alert addAction:[UIAlertAction actionWithTitle:ohkTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        isOneHit = !isOneHit;
-        [self showMenu];
-    }]];
-
-    // XP Multiplier
-    NSString *xpTitle = [NSString stringWithFormat:@"XP Multiplier: %dx", xpMultiplier];
-    [alert addAction:[UIAlertAction actionWithTitle:xpTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        if (xpMultiplier == 1) xpMultiplier = 10;
-        else if (xpMultiplier == 10) xpMultiplier = 100;
-        else xpMultiplier = 1;
-        [self showMenu];
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *rootVC = [[UIApplication sharedApplication] keyWindow].rootViewController;
-        // Handle case where rootVC might be presenting something already
-        while (rootVC.presentedViewController) {
-            rootVC = rootVC.presentedViewController;
-        }
-        [rootVC presentViewController:alert animated:YES completion:nil];
-    });
+- (void)handleButtonDrag:(UIPanGestureRecognizer *)gesture {
+    UIView *button = gesture.view;
+    CGPoint translation = [gesture translationInView:button.superview];
+    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:button.superview];
 }
+
+- (void)showMenu {
+    if (menuView) return;
+    
+    UIWindow *window = [[UIApplication sharedApplication] keyWindow];
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    
+    // Dark overlay
+    overlayView = [[UIView alloc] initWithFrame:screenBounds];
+    overlayView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+    UITapGestureRecognizer *dismissTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(hideMenu)];
+    [overlayView addGestureRecognizer:dismissTap];
+    [window addSubview:overlayView];
+    
+    // Menu container - centered
+    CGFloat menuWidth = 280;
+    CGFloat menuHeight = 320;
+    menuView = [[UIView alloc] initWithFrame:CGRectMake((screenBounds.size.width - menuWidth)/2,
+                                                         (screenBounds.size.height - menuHeight)/2,
+                                                         menuWidth, menuHeight)];
+    menuView.backgroundColor = [[UIColor darkGrayColor] colorWithAlphaComponent:0.95];
+    menuView.layer.cornerRadius = 15;
+    menuView.clipsToBounds = YES;
+    
+    // Title
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, menuWidth, 30)];
+    title.text = @"Acecraft Mod Menu";
+    title.textColor = [UIColor whiteColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.font = [UIFont boldSystemFontOfSize:18];
+    [menuView addSubview:title];
+    
+    CGFloat yOffset = 50;
+    
+    // God Mode Toggle
+    UILabel *godLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 150, 30)];
+    godLabel.text = @"God Mode";
+    godLabel.textColor = [UIColor whiteColor];
+    [menuView addSubview:godLabel];
+    
+    UISwitch *godSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(menuWidth - 70, yOffset, 50, 30)];
+    godSwitch.on = isGodMode;
+    godSwitch.tag = 1;
+    [godSwitch addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [menuView addSubview:godSwitch];
+    yOffset += 50;
+    
+    // One Hit Kill Toggle
+    UILabel *ohkLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 150, 30)];
+    ohkLabel.text = @"One Hit Kill";
+    ohkLabel.textColor = [UIColor whiteColor];
+    [menuView addSubview:ohkLabel];
+    
+    UISwitch *ohkSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(menuWidth - 70, yOffset, 50, 30)];
+    ohkSwitch.on = isOneHit;
+    ohkSwitch.tag = 2;
+    [ohkSwitch addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [menuView addSubview:ohkSwitch];
+    yOffset += 50;
+    
+    // XP Multiplier Input
+    UILabel *xpLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 150, 30)];
+    xpLabel.text = @"XP Multiplier";
+    xpLabel.textColor = [UIColor whiteColor];
+    [menuView addSubview:xpLabel];
+    
+    UITextField *xpField = [[UITextField alloc] initWithFrame:CGRectMake(menuWidth - 80, yOffset, 60, 30)];
+    xpField.backgroundColor = [UIColor whiteColor];
+    xpField.textColor = [UIColor blackColor];
+    xpField.textAlignment = NSTextAlignmentCenter;
+    xpField.keyboardType = UIKeyboardTypeNumberPad;
+    xpField.text = [NSString stringWithFormat:@"%d", xpMultiplier];
+    xpField.layer.cornerRadius = 5;
+    xpField.tag = 100;
+    [xpField addTarget:self action:@selector(xpFieldChanged:) forControlEvents:UIControlEventEditingChanged];
+    [menuView addSubview:xpField];
+    yOffset += 60;
+    
+    // Debug Info
+    UILabel *debugLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, yOffset, menuWidth - 20, 60)];
+    debugLabel.text = [NSString stringWithFormat:@"Debug: Base=0x%lx\nCheck Console for logs", getUnityFrameworkBase()];
+    debugLabel.textColor = [UIColor greenColor];
+    debugLabel.font = [UIFont systemFontOfSize:10];
+    debugLabel.numberOfLines = 0;
+    [menuView addSubview:debugLabel];
+    yOffset += 70;
+    
+    // Close Button
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeBtn.frame = CGRectMake(20, menuHeight - 50, menuWidth - 40, 40);
+    closeBtn.backgroundColor = [UIColor redColor];
+    [closeBtn setTitle:@"CLOSE" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    closeBtn.layer.cornerRadius = 8;
+    [closeBtn addTarget:self action:@selector(hideMenu) forControlEvents:UIControlEventTouchUpInside];
+    [menuView addSubview:closeBtn];
+    
+    [window addSubview:menuView];
+}
+
+- (void)hideMenu {
+    [menuView removeFromSuperview];
+    [overlayView removeFromSuperview];
+    menuView = nil;
+    overlayView = nil;
+}
+
+- (void)toggleChanged:(UISwitch *)sender {
+    if (sender.tag == 1) {
+        isGodMode = sender.on;
+        NSLog(@"[AcecraftHack] God Mode: %@", isGodMode ? @"ON" : @"OFF");
+    } else if (sender.tag == 2) {
+        isOneHit = sender.on;
+        NSLog(@"[AcecraftHack] One Hit Kill: %@", isOneHit ? @"ON" : @"OFF");
+    }
+}
+
+- (void)xpFieldChanged:(UITextField *)field {
+    xpMultiplier = [field.text intValue];
+    if (xpMultiplier < 1) xpMultiplier = 1;
+    NSLog(@"[AcecraftHack] XP Multiplier: %d", xpMultiplier);
+}
+
 @end
 
-void setupMenu() {
+// ============================================================================
+// SETUP FLOATING BUTTON
+// ============================================================================
+void setupFloatingButton() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
-        menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        menuButton.frame = CGRectMake(50, 50, 80, 40);
-        menuButton.backgroundColor = [UIColor redColor];
-        [menuButton setTitle:@"MOD" forState:UIControlStateNormal];
-        [menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         
-        // Use the handler instance as the target
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[MenuHandler sharedInstance] action:@selector(handleTap:)];
-        [menuButton addGestureRecognizer:tap];
+        // Circular floating button
+        floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        floatingButton.frame = CGRectMake(30, 100, 50, 50);
+        floatingButton.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.6];
+        floatingButton.layer.cornerRadius = 25;
+        floatingButton.clipsToBounds = YES;
+        [floatingButton setTitle:@"MOD" forState:UIControlStateNormal];
+        [floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:12];
         
-        [window addSubview:menuButton];
+        // Tap to open menu
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[ModMenuController shared] action:@selector(handleButtonTap:)];
+        [floatingButton addGestureRecognizer:tap];
+        
+        // Drag to move
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[ModMenuController shared] action:@selector(handleButtonDrag:)];
+        [floatingButton addGestureRecognizer:pan];
+        
+        [window addSubview:floatingButton];
+        NSLog(@"[AcecraftHack] Floating button added to window");
     });
 }
 
-// --- Hooks ---
-
-// Hook: BB.Bullet.SetHp
-// RVA: 0x4530C8 (from dump.cs line 441133)
-// void SetHp(FP currHp)
-%hook Bullet
-
-- (void)SetHp:(struct FP)currHp {
-    if (isGodMode) {
-        // Naive check: If current HP is dropping, and it's HUGE (Player), prevent it?
-        // Better: Check if this Bullet is a Player.
-        // How? PrefabName?
-        // For now, if GodMode is on, we prevent HP reduction for EVERYONE (Bad idea) OR
-        // we print the PrefabName to identifying the Player first.
-        
-        // If we can identify the player:
-        // if ([self.PrefabName containsString:@"Hero"]) { return; }
-        
-        // Placeholder safe logic:
-        // Only prevent death (HP <= 0)
-        if (currHp._serializedValue <= 0) {
-             // For God Mode we usually want to avoid taking damage at all.
-             // Let's try to verify if this is the Player.
-             // Assuming Player bullet/ship has 'Player' in name or strict MaxHP.
-        }
-    }
-    %orig(currHp);
-}
-
-// Hook: BB.Bullet.InitInfo
-// RVA: 0x452E10
-// void InitInfo(BulletData_BB bulletData)
-- (void)InitInfo:(void *)bulletDataPtr {
-    if (isOneHit) {
-        // We need to access bulletData fields.
-        // struct BulletData_BB *data = (struct BulletData_BB *)bulletDataPtr;
-        // data->MoveSpeed = FloatToFP(50.0f); // Example modification
-        // We still need to find the Damage field offset!
-    }
-    %orig;
-}
-
-%end
-
-// --- Constructor ---
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
 %ctor {
-    setupMenu();
-    %init;
+    NSLog(@"[AcecraftHack] Tweak loaded!");
+    setupFloatingButton();
+    setupNativeHooks();
 }
