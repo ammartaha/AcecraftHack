@@ -1,6 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "Utils.h"
-#import "substrate.h"
+#import <CydiaSubstrate.h>
 
 // --- Global Toggles ---
 static BOOL isGodMode = NO;
