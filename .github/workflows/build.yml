@@ -23,6 +23,7 @@ jobs:
 
       - name: Download iOS SDKs
         run: |
+          rm -rf $HOME/theos/sdks
           git clone --quiet --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
 
       - name: Build Tweak
