@@ -28,13 +28,28 @@ struct BulletData_BB {
 @end
 
 // --- UI Helper ---
-@interface UIWindow (Tweak)
-- (UIViewController *)rootViewController;
+// --- Menu Handler ---
+@interface MenuHandler : NSObject
++ (instancetype)sharedInstance;
+- (void)showMenu;
 @end
 
-UIButton *menuButton;
+@implementation MenuHandler
 
-void showMenu() {
++ (instancetype)sharedInstance {
+    static MenuHandler *sharedInstance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sharedInstance = [[MenuHandler alloc] init];
+    });
+    return sharedInstance;
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)sender {
+    [self showMenu];
+}
+
+- (void)showMenu {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Mod Menu"
                                                                    message:@"By Antigravity"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
@@ -43,14 +58,14 @@ void showMenu() {
     NSString *godTitle = isGodMode ? @"[ON] God Mode" : @"[OFF] God Mode";
     [alert addAction:[UIAlertAction actionWithTitle:godTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         isGodMode = !isGodMode;
-        showMenu(); // Reopen to show state change
+        [self showMenu];
     }]];
 
     // One Hit Kill Toggle
     NSString *ohkTitle = isOneHit ? @"[ON] One Hit Kill" : @"[OFF] One Hit Kill";
     [alert addAction:[UIAlertAction actionWithTitle:ohkTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         isOneHit = !isOneHit;
-        showMenu();
+        [self showMenu];
     }]];
 
     // XP Multiplier
@@ -59,13 +74,21 @@ void showMenu() {
         if (xpMultiplier == 1) xpMultiplier = 10;
         else if (xpMultiplier == 10) xpMultiplier = 100;
         else xpMultiplier = 1;
-        showMenu();
+        [self showMenu];
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
 
-    [[[UIApplication sharedApplication] keyWindow].rootViewController presentViewController:alert animated:YES completion:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *rootVC = [[UIApplication sharedApplication] keyWindow].rootViewController;
+        // Handle case where rootVC might be presenting something already
+        while (rootVC.presentedViewController) {
+            rootVC = rootVC.presentedViewController;
+        }
+        [rootVC presentViewController:alert animated:YES completion:nil];
+    });
 }
+@end
 
 void setupMenu() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -75,15 +98,12 @@ void setupMenu() {
         menuButton.backgroundColor = [UIColor redColor];
         [menuButton setTitle:@"MOD" forState:UIControlStateNormal];
         [menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        [menuButton addTarget:window action:@selector(menuButtonTapped) forControlEvents:UIControlEventTouchUpInside];
         
-        // Add action to window to handle tap? No, adding target self won't work easily in C func.
-        // Let's use a simpler drag handler or just add to window.
-        [window addSubview:menuButton];
-        
-        // Simple tap handler
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:window action:@selector(handleMenuTap)];
+        // Use the handler instance as the target
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[MenuHandler sharedInstance] action:@selector(handleTap:)];
         [menuButton addGestureRecognizer:tap];
+        
+        [window addSubview:menuButton];
     });
 }
 
