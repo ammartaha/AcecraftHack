@@ -20,6 +20,7 @@ struct FP {
     int64_t _serializedValue;
 };
 
+static inline struct FP FloatToFP(float value) __attribute__((unused));
 static inline struct FP FloatToFP(float value) {
     struct FP fp;
     fp._serializedValue = (int64_t)(value * 4294967296.0);
