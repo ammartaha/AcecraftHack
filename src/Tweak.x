@@ -6,6 +6,7 @@
 static BOOL isGodMode = NO;
 static BOOL isOneHit = NO;
 static int xpMultiplier = 1;
+static UIButton *menuButton = nil;
 
 // --- Interfaces for Il2Cpp Classes ---
 // Defined based on dump.cs
