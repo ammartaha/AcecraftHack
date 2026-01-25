@@ -1,10 +1,11 @@
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
+#import <objc/runtime.h>
 #import <CydiaSubstrate/CydiaSubstrate.h>
 
 // ============================================================================
-// LOGGER MOD - Records function calls to a file
+// ADVANCED LOGGER - Traces Unity il2cpp method calls
 // ============================================================================
 
 static NSString *logFilePath = nil;
@@ -12,7 +13,7 @@ static NSFileHandle *logFileHandle = nil;
 static int callCount = 0;
 
 // ============================================================================
-// LOGGING FUNCTION - Writes to file in Documents folder
+// LOGGING FUNCTION
 // ============================================================================
 void logToFile(NSString *message) {
     if (!logFileHandle) return;
@@ -23,31 +24,27 @@ void logToFile(NSString *message) {
     NSString *logLine = [NSString stringWithFormat:@"[%d] %@%@\n", callCount++, timestamp, message];
     
     [logFileHandle writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
-    [logFileHandle synchronizeFile]; // Flush immediately
+    [logFileHandle synchronizeFile];
     
-    NSLog(@"[AcecraftLogger] %@", message);
+    NSLog(@"[AcecraftLog] %@", message);
 }
 
 void initLogFile() {
-    // Get Documents directory
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsDir = [paths firstObject];
     
-    // Create log file with timestamp
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_log_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_trace_%@.txt", timestamp]];
     
-    // Create file
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    NSLog(@"[AcecraftLogger] Log file created at: %@", logFilePath);
-    logToFile(@"=== ACECRAFT FUNCTION LOGGER STARTED ===");
-    logToFile([NSString stringWithFormat:@"Log file: %@", logFilePath]);
+    NSLog(@"[AcecraftLog] Trace file: %@", logFilePath);
+    logToFile(@"=== ACECRAFT ADVANCED TRACER ===");
 }
 
 // ============================================================================
@@ -57,116 +54,11 @@ struct FP {
     int64_t _serializedValue;
 };
 
-static inline float FPToFloat(struct FP value) {
-    return (float)value._serializedValue / 4294967296.0f;
-}
-
 // ============================================================================
-// ORIGINAL FUNCTION POINTERS - We'll hook MANY functions to see which are called
+// GET UNITYFRAMEWORK BASE
 // ============================================================================
+static uintptr_t unityBase = 0;
 
-// Player class
-static void (*orig_Player_Hit)(void *self);
-
-// Bullet class
-static void (*orig_Bullet_SetHp)(void *self, struct FP hp);
-static void (*orig_Bullet_InitInfo)(void *self, void *bulletData);
-static void (*orig_Bullet_Destroy)(void *self);
-static void (*orig_Bullet_UpdateLife)(void *self, struct FP lifeTime);
-
-// BulletManager class
-static void (*orig_BulletManager_SpawnBullet)(void *self, void *bulletData);
-static void *(*orig_BulletManager_Spawn)(void *self, void *prefabName);
-static void (*orig_BulletManager_Destroy)(void *self, void *bullet);
-
-// BulletData_BB class
-static void (*orig_BulletData_SetPosition)(void *self, void *position);
-static void (*orig_BulletData_SetSpeed)(void *self, struct FP speed);
-static void (*orig_BulletData_Dispose)(void *self);
-
-// ============================================================================
-// HOOKS - Log everything!
-// ============================================================================
-
-void hook_Player_Hit(void *self) {
-    logToFile([NSString stringWithFormat:@"Player.Hit() called! self=%p", self]);
-    orig_Player_Hit(self);
-}
-
-void hook_Bullet_SetHp(void *self, struct FP hp) {
-    logToFile([NSString stringWithFormat:@"Bullet.SetHp() self=%p HP=%lld (%.2f)", 
-               self, hp._serializedValue, FPToFloat(hp)]);
-    orig_Bullet_SetHp(self, hp);
-}
-
-void hook_Bullet_InitInfo(void *self, void *bulletData) {
-    logToFile([NSString stringWithFormat:@"Bullet.InitInfo() self=%p bulletData=%p", self, bulletData]);
-    orig_Bullet_InitInfo(self, bulletData);
-}
-
-void hook_Bullet_Destroy(void *self) {
-    logToFile([NSString stringWithFormat:@"Bullet.Destroy() self=%p", self]);
-    orig_Bullet_Destroy(self);
-}
-
-void hook_Bullet_UpdateLife(void *self, struct FP lifeTime) {
-    // This might be called frequently, so we'll log less detail
-    static int updateCount = 0;
-    if (updateCount++ % 100 == 0) { // Log every 100th call
-        logToFile([NSString stringWithFormat:@"Bullet.UpdateLife() [x100] self=%p life=%.2f", 
-                   self, FPToFloat(lifeTime)]);
-    }
-    orig_Bullet_UpdateLife(self, lifeTime);
-}
-
-void hook_BulletManager_SpawnBullet(void *self, void *bulletData) {
-    logToFile([NSString stringWithFormat:@"BulletManager.SpawnBullet() self=%p bulletData=%p", self, bulletData]);
-    
-    // Try to read some fields from bulletData
-    if (bulletData) {
-        // MaxHP is at offset 0x88
-        struct FP *maxHP = (struct FP *)((uintptr_t)bulletData + 0x88);
-        // CanBeHit is at offset 0x84
-        bool *canBeHit = (bool *)((uintptr_t)bulletData + 0x84);
-        
-        logToFile([NSString stringWithFormat:@"  -> MaxHP=%lld (%.2f), CanBeHit=%d", 
-                   maxHP->_serializedValue, FPToFloat(*maxHP), *canBeHit]);
-    }
-    
-    orig_BulletManager_SpawnBullet(self, bulletData);
-}
-
-void *hook_BulletManager_Spawn(void *self, void *prefabName) {
-    logToFile([NSString stringWithFormat:@"BulletManager.Spawn() self=%p prefabName=%p", self, prefabName]);
-    return orig_BulletManager_Spawn(self, prefabName);
-}
-
-void hook_BulletManager_Destroy_Bullet(void *self, void *bullet) {
-    logToFile([NSString stringWithFormat:@"BulletManager.Destroy() self=%p bullet=%p", self, bullet]);
-    orig_BulletManager_Destroy(self, bullet);
-}
-
-void hook_BulletData_SetPosition(void *self, void *position) {
-    static int posCount = 0;
-    if (posCount++ % 50 == 0) { // Log every 50th call
-        logToFile([NSString stringWithFormat:@"BulletData.SetPosition() [x50] self=%p", self]);
-    }
-    orig_BulletData_SetPosition(self, position);
-}
-
-void hook_BulletData_SetSpeed(void *self, struct FP speed) {
-    logToFile([NSString stringWithFormat:@"BulletData.SetSpeed() self=%p speed=%.2f", self, FPToFloat(speed)]);
-    orig_BulletData_SetSpeed(self, speed);
-}
-
-void hook_BulletData_Dispose(void *self) {
-    logToFile([NSString stringWithFormat:@"BulletData.Dispose() self=%p", self]);
-    orig_BulletData_Dispose(self);
-}
-
-// ============================================================================
-// GET UNITYFRAMEWORK BASE ADDRESS
-// ============================================================================
 static uintptr_t getUnityFrameworkBase() {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const char *name = _dyld_get_image_name(i);
@@ -177,94 +69,195 @@ static uintptr_t getUnityFrameworkBase() {
     return 0;
 }
 
-static uintptr_t unityBase = 0;
+// ============================================================================
+// IL2CPP EXPORTS - These should work on any version!
+// ============================================================================
+typedef void* (*il2cpp_domain_get_t)(void);
+typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, const char* name);
+typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
+typedef void* (*il2cpp_method_get_pointer_t)(void* method);
+typedef void* (*il2cpp_assembly_get_image_t)(void* assembly);
+typedef void** (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
+typedef const char* (*il2cpp_class_get_name_t)(void* klass);
+typedef void* (*il2cpp_string_new_t)(const char* str);
+
+static il2cpp_domain_get_t il2cpp_domain_get = NULL;
+static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
+static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
+static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
+static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
+static il2cpp_class_get_name_t il2cpp_class_get_name = NULL;
+static il2cpp_string_new_t il2cpp_string_new = NULL;
+
+// ============================================================================
+// HOOKED FUNCTIONS - Using dynamic addresses this time
+// ============================================================================
+
+// We'll hook Unity's SendMessage to see all game communications
+typedef void (*Unity_SendMessage_t)(const char* objName, const char* methodName, const char* message);
+static Unity_SendMessage_t orig_SendMessage = NULL;
+
+void hook_SendMessage(const char* objName, const char* methodName, const char* message) {
+    logToFile([NSString stringWithFormat:@"SendMessage: %s.%s(%s)", 
+               objName ? objName : "null", 
+               methodName ? methodName : "null", 
+               message ? message : "null"]);
+    if (orig_SendMessage) orig_SendMessage(objName, methodName, message);
+}
+
+// Hook Application.Quit to detect game exit
+typedef void (*App_Quit_t)(void);
+static App_Quit_t orig_AppQuit = NULL;
+
+void hook_AppQuit(void) {
+    logToFile(@"Application.Quit called!");
+    if (orig_AppQuit) orig_AppQuit();
+}
+
+// ============================================================================
+// IMPORT TABLE HOOKS - Hook common functions by name
+// ============================================================================
+void setupImportHooks() {
+    // Try to find and hook UnitySendMessage from symbols
+    void *unityHandle = dlopen(NULL, RTLD_NOW);
+    
+    // Look for UnitySendMessage - this is exported by Unity
+    void *sendMsgPtr = dlsym(unityHandle, "UnitySendMessage");
+    if (sendMsgPtr) {
+        MSHookFunction(sendMsgPtr, (void*)hook_SendMessage, (void**)&orig_SendMessage);
+        logToFile([NSString stringWithFormat:@"Hooked UnitySendMessage at %p", sendMsgPtr]);
+    } else {
+        logToFile(@"UnitySendMessage not found in exports");
+    }
+    
+    // Try to find il2cpp exports
+    il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(unityHandle, "il2cpp_domain_get");
+    il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(unityHandle, "il2cpp_class_from_name");
+    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(unityHandle, "il2cpp_class_get_method_from_name");
+    il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(unityHandle, "il2cpp_assembly_get_image");
+    il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(unityHandle, "il2cpp_domain_get_assemblies");
+    il2cpp_class_get_name = (il2cpp_class_get_name_t)dlsym(unityHandle, "il2cpp_class_get_name");
+    il2cpp_string_new = (il2cpp_string_new_t)dlsym(unityHandle, "il2cpp_string_new");
+    
+    if (il2cpp_domain_get) {
+        logToFile(@"Found il2cpp_domain_get");
+    }
+    if (il2cpp_class_from_name) {
+        logToFile(@"Found il2cpp_class_from_name");
+    }
+    if (il2cpp_class_get_method_from_name) {
+        logToFile(@"Found il2cpp_class_get_method_from_name");
+    }
+}
+
+// ============================================================================
+// DYNAMIC IL2CPP HOOKS - Find methods at runtime
+// ============================================================================
+void* findIl2CppMethod(const char* namespaze, const char* className, const char* methodName, int argCount) {
+    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name) {
+        return NULL;
+    }
+    
+    void* domain = il2cpp_domain_get();
+    if (!domain) return NULL;
+    
+    size_t size = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    
+    for (size_t i = 0; i < size; i++) {
+        void* image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        
+        void* klass = il2cpp_class_from_name(image, namespaze, className);
+        if (klass) {
+            void* method = il2cpp_class_get_method_from_name(klass, methodName, argCount);
+            if (method) {
+                logToFile([NSString stringWithFormat:@"Found %s.%s.%s", namespaze, className, methodName]);
+                // Note: Need il2cpp_method_get_pointer to get actual address
+                return method;
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// ============================================================================
+// OBJC METHOD SWIZZLE - Hook NSObject methods
+// ============================================================================
+static IMP orig_performSelector = NULL;
+
+id hook_performSelector(id self, SEL _cmd, SEL aSelector) {
+    const char* selName = sel_getName(aSelector);
+    const char* className = object_getClassName(self);
+    
+    // Log interesting selectors
+    if (strstr(selName, "damage") || strstr(selName, "health") || 
+        strstr(selName, "exp") || strstr(selName, "gold") ||
+        strstr(selName, "gem") || strstr(selName, "hit") ||
+        strstr(selName, "Damage") || strstr(selName, "Health")) {
+        logToFile([NSString stringWithFormat:@"ObjC: [%s %s]", className, selName]);
+    }
+    
+    return ((id(*)(id, SEL, SEL))orig_performSelector)(self, _cmd, aSelector);
+}
 
 // ============================================================================
 // SETUP ALL HOOKS
 // ============================================================================
-void setupLoggerHooks() {
+void setupAdvancedHooks() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         unityBase = getUnityFrameworkBase();
-        if (!unityBase) {
-            logToFile(@"ERROR: UnityFramework not found!");
-            return;
-        }
         logToFile([NSString stringWithFormat:@"UnityFramework base: 0x%lx", unityBase]);
         
-        // Hook Player.Hit - RVA: 0x453E3C
-        MSHookFunction((void *)(unityBase + 0x453E3C), (void *)hook_Player_Hit, (void **)&orig_Player_Hit);
-        logToFile(@"Hooked Player.Hit at 0x453E3C");
+        // Setup import-based hooks
+        setupImportHooks();
         
-        // Hook Bullet.SetHp - RVA: 0x4530C8
-        MSHookFunction((void *)(unityBase + 0x4530C8), (void *)hook_Bullet_SetHp, (void **)&orig_Bullet_SetHp);
-        logToFile(@"Hooked Bullet.SetHp at 0x4530C8");
+        // Try to find methods dynamically
+        logToFile(@"Searching for game methods...");
         
-        // Hook Bullet.InitInfo - RVA: 0x452E10
-        MSHookFunction((void *)(unityBase + 0x452E10), (void *)hook_Bullet_InitInfo, (void **)&orig_Bullet_InitInfo);
-        logToFile(@"Hooked Bullet.InitInfo at 0x452E10");
+        // These will log if found
+        findIl2CppMethod("BB", "BulletManager", "SpawnBullet", 1);
+        findIl2CppMethod("BB", "Bullet", "SetHp", 1);
+        findIl2CppMethod("", "Player", "Hit", 0);
         
-        // Hook Bullet.Destroy - RVA: 0x453018
-        MSHookFunction((void *)(unityBase + 0x453018), (void *)hook_Bullet_Destroy, (void **)&orig_Bullet_Destroy);
-        logToFile(@"Hooked Bullet.Destroy at 0x453018");
+        // Swizzle NSObject performSelector to catch ObjC calls
+        Method method = class_getInstanceMethod([NSObject class], @selector(performSelector:));
+        if (method) {
+            orig_performSelector = method_setImplementation(method, (IMP)hook_performSelector);
+            logToFile(@"Swizzled NSObject performSelector:");
+        }
         
-        // Hook Bullet.UpdateLife - RVA: 0x452F84
-        MSHookFunction((void *)(unityBase + 0x452F84), (void *)hook_Bullet_UpdateLife, (void **)&orig_Bullet_UpdateLife);
-        logToFile(@"Hooked Bullet.UpdateLife at 0x452F84");
-        
-        // Hook BulletManager.SpawnBullet - RVA: 0x453ABC
-        MSHookFunction((void *)(unityBase + 0x453ABC), (void *)hook_BulletManager_SpawnBullet, (void **)&orig_BulletManager_SpawnBullet);
-        logToFile(@"Hooked BulletManager.SpawnBullet at 0x453ABC");
-        
-        // Hook BulletManager.Spawn - RVA: 0x4537A0
-        MSHookFunction((void *)(unityBase + 0x4537A0), (void *)hook_BulletManager_Spawn, (void **)&orig_BulletManager_Spawn);
-        logToFile(@"Hooked BulletManager.Spawn at 0x4537A0");
-        
-        // Hook BulletManager.Destroy - RVA: 0x4532B8
-        MSHookFunction((void *)(unityBase + 0x4532B8), (void *)hook_BulletManager_Destroy_Bullet, (void **)&orig_BulletManager_Destroy);
-        logToFile(@"Hooked BulletManager.Destroy at 0x4532B8");
-        
-        // Hook BulletData_BB.SetPosition - RVA: 0x34CEB8
-        MSHookFunction((void *)(unityBase + 0x34CEB8), (void *)hook_BulletData_SetPosition, (void **)&orig_BulletData_SetPosition);
-        logToFile(@"Hooked BulletData.SetPosition at 0x34CEB8");
-        
-        // Hook BulletData_BB.SetSpeed - RVA: 0x34D134
-        MSHookFunction((void *)(unityBase + 0x34D134), (void *)hook_BulletData_SetSpeed, (void **)&orig_BulletData_SetSpeed);
-        logToFile(@"Hooked BulletData.SetSpeed at 0x34D134");
-        
-        // Hook BulletData_BB.Dispose - RVA: 0x34EEC4
-        MSHookFunction((void *)(unityBase + 0x34EEC4), (void *)hook_BulletData_Dispose, (void **)&orig_BulletData_Dispose);
-        logToFile(@"Hooked BulletData.Dispose at 0x34EEC4");
-        
-        logToFile(@"=== ALL HOOKS INSTALLED ===");
-        logToFile(@"Play the game now! Log will record function calls.");
-        logToFile([NSString stringWithFormat:@"Log file location: %@", logFilePath]);
+        logToFile(@"=== ADVANCED TRACER READY ===");
+        logToFile(@"Play the game - all interesting calls will be logged!");
+        logToFile([NSString stringWithFormat:@"Log file: %@", logFilePath]);
     });
 }
 
 // ============================================================================
-// UI: Simple status indicator
+// UI STATUS
 // ============================================================================
 static UILabel *statusLabel = nil;
 
-void setupStatusIndicator() {
+void setupStatusUI() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
         
-        statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 200, 60)];
-        statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
-        statusLabel.textColor = [UIColor greenColor];
-        statusLabel.font = [UIFont fontWithName:@"Menlo" size:10];
-        statusLabel.numberOfLines = 3;
-        statusLabel.text = [NSString stringWithFormat:@"🔴 LOGGER ACTIVE\nCalls: %d\nCheck Documents/", callCount];
-        statusLabel.layer.cornerRadius = 5;
+        statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 220, 70)];
+        statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
+        statusLabel.textColor = [UIColor cyanColor];
+        statusLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+        statusLabel.numberOfLines = 4;
+        statusLabel.text = @"🔍 ADVANCED TRACER\nSearching for methods...\nPlay the game!";
+        statusLabel.layer.cornerRadius = 8;
         statusLabel.clipsToBounds = YES;
         statusLabel.textAlignment = NSTextAlignmentCenter;
         
         [window addSubview:statusLabel];
         
-        // Update counter periodically
-        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
-            statusLabel.text = [NSString stringWithFormat:@"🔴 LOGGER ACTIVE\nCalls: %d\nLog: Documents/", callCount];
+        // Update status periodically
+        [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+            statusLabel.text = [NSString stringWithFormat:@"🔍 ADVANCED TRACER\nCalls logged: %d\nCheck Documents/", callCount];
         }];
     });
 }
@@ -273,11 +266,11 @@ void setupStatusIndicator() {
 // CONSTRUCTOR
 // ============================================================================
 %ctor {
-    NSLog(@"[AcecraftLogger] ==========================================");
-    NSLog(@"[AcecraftLogger] LOGGER MODE - Recording all function calls");
-    NSLog(@"[AcecraftLogger] ==========================================");
+    NSLog(@"[AcecraftLog] ==========================================");
+    NSLog(@"[AcecraftLog] ADVANCED TRACER - Using dynamic method lookup");
+    NSLog(@"[AcecraftLog] ==========================================");
     
     initLogFile();
-    setupStatusIndicator();
-    setupLoggerHooks();
+    setupStatusUI();
+    setupAdvancedHooks();
 }
