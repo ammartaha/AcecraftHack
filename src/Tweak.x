@@ -53,7 +53,6 @@ typedef void* (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
 typedef void* (*il2cpp_assembly_get_image_t)(void* assembly);
 typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, const char* name);
 typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
-typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
 
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
@@ -61,7 +60,6 @@ static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
 static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
 static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
-static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
 
 // ============================================================================
