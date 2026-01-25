@@ -88,24 +88,7 @@ void* findClass(const char* namespaze, const char* className) {
     return NULL;
 }
 
-// ============================================================================
-// HOOK STORAGE - Store original pointers for each hooked method
-// ============================================================================
-#define MAX_HOOKS 50
-static void* origPtrs[MAX_HOOKS];
-static const char* hookNames[MAX_HOOKS];
-static int hookCount = 0;
-
-// Generic hook that logs the method name
-void genericHook(void* self, ...) {
-    // Get return address to identify which hook
-    void* retAddr = __builtin_return_address(0);
-    
-    // Find which hook this is (brute force for simplicity)
-    for (int i = 0; i < hookCount; i++) {
-        logToFile([NSString stringWithFormat:@"[CALL] %s (self=%p)", hookNames[i], self]);
-    }
-}
+// Note: Using specific hooks below instead of generic hook
 
 // ============================================================================
 // SPECIFIC HOOKS - One for each method we want to monitor
