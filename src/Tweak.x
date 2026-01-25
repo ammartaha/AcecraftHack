@@ -7,10 +7,10 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V16 - LOGIC UPDATE HOOK (HYBRIDCLR SAFE RETRY)
+// TWEAK V17 - HYBRIDCLR RUNTIME INVOKE HOOK (SAFE FOR INTERPRETED METHODS)
 // ============================================================================
 // Previous bug: PlayerController.get_PlayerModel() returns PlayerModel, NOT PlayerLogic.
-// Fix: Hook PlayerLogic.OnBattleUpdate and set GMNoDamage on the real logic instance.
+// Fix: Use il2cpp_runtime_invoke to catch PlayerLogic.OnBattleUpdate even when methods are interpreted.
 // HybridCLR hotfix assemblies load late, so we retry until classes/methods resolve.
 
 static NSString *logFilePath = nil;
@@ -23,6 +23,7 @@ static int setupAttempts = 0;
 static CFAbsoluteTime lastToggleCheck = 0;
 static CFAbsoluteTime lastHookLog = 0;
 static CFAbsoluteTime lastHpBoost = 0;
+static BOOL runtimeInvokeHooked = NO;
 
 // ============================================================================
 // LOGGING
@@ -45,7 +46,7 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v16_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v17_%@.txt", timestamp]];
     toggleFilePath = [documentsDir stringByAppendingPathComponent:@"acecraft_toggle.txt"];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
@@ -56,7 +57,7 @@ void initLogFile() {
         [@"1" writeToFile:toggleFilePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
     
-    logToFile(@"=== ACECRAFT TRACER V16: LOGIC UPDATE HOOK ===");
+    logToFile(@"=== ACECRAFT TRACER V17: RUNTIME INVOKE HOOK ===");
     logToFile([NSString stringWithFormat:@"[INFO] Toggle file: %@", toggleFilePath]);
 }
 
@@ -71,6 +72,10 @@ typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
 typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
 typedef void* (*il2cpp_method_get_pointer_t)(void* method);
+typedef void* (*il2cpp_method_get_class_t)(void* method);
+typedef const char* (*il2cpp_class_get_name_t)(void* klass);
+typedef const char* (*il2cpp_class_get_namespace_t)(void* klass);
+typedef void* (*il2cpp_runtime_invoke_t)(void* method, void* obj, void** params, void** exc);
 
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
@@ -80,6 +85,10 @@ static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
 static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
 static il2cpp_method_get_pointer_t il2cpp_method_get_pointer = NULL;
+static il2cpp_method_get_class_t il2cpp_method_get_class = NULL;
+static il2cpp_class_get_name_t il2cpp_class_get_name = NULL;
+static il2cpp_class_get_namespace_t il2cpp_class_get_namespace = NULL;
+static il2cpp_runtime_invoke_t il2cpp_runtime_invoke = NULL;
 
 // Minimal MethodInfo definition for methodPointer access
 typedef struct MethodInfo {
@@ -111,6 +120,10 @@ void loadIl2Cpp() {
     il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
     il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(h, "il2cpp_class_get_method_from_name");
     il2cpp_method_get_pointer = (il2cpp_method_get_pointer_t)dlsym(h, "il2cpp_method_get_pointer");
+    il2cpp_method_get_class = (il2cpp_method_get_class_t)dlsym(h, "il2cpp_method_get_class");
+    il2cpp_class_get_name = (il2cpp_class_get_name_t)dlsym(h, "il2cpp_class_get_name");
+    il2cpp_class_get_namespace = (il2cpp_class_get_namespace_t)dlsym(h, "il2cpp_class_get_namespace");
+    il2cpp_runtime_invoke = (il2cpp_runtime_invoke_t)dlsym(h, "il2cpp_runtime_invoke");
 }
 
 void* findClass(const char* namespaze, const char* className) {
@@ -147,8 +160,11 @@ MethodInfo* findMethodInfo(void* klass, const char* methodName) {
 
 void* getMethodPointer(MethodInfo* method) {
     if (!method) return NULL;
+    if (il2cpp_method_get_pointer) {
+        void* p = il2cpp_method_get_pointer(method);
+        if (p) return p;
+    }
     if (method->methodPointer) return method->methodPointer;
-    if (il2cpp_method_get_pointer) return il2cpp_method_get_pointer(method);
     if (method->virtualMethodPointer) return method->virtualMethodPointer;
     return NULL;
 }
@@ -165,6 +181,15 @@ static void (*DoInvincible)(void* logic, float duration);
 
 // PlayerLogic.SetPlayerHpToMax()
 static void (*SetPlayerHpToMax)(void* logic);
+
+// MethodInfo pointers for runtime invoke hook
+static MethodInfo* gMiSetGM = NULL;
+static MethodInfo* gMiHpMax = NULL;
+static MethodInfo* gMiOnBattleUpdate = NULL;
+
+// il2cpp_runtime_invoke hook
+static il2cpp_runtime_invoke_t orig_il2cpp_runtime_invoke = NULL;
+static __thread int gInvokeDepth = 0;
 
 // ============================================================================
 // HOOKS
@@ -226,6 +251,63 @@ void hook_PlayerLogic_OnBattleUpdate(void* self) {
     if (orig_PlayerLogic_OnBattleUpdate) orig_PlayerLogic_OnBattleUpdate(self);
 }
 
+static BOOL isTargetOnBattleUpdate(void* method) {
+    if (!method) return NO;
+    if (gMiOnBattleUpdate && method == (void*)gMiOnBattleUpdate) return YES;
+    if (!il2cpp_method_get_name || !il2cpp_method_get_class || !il2cpp_class_get_name || !il2cpp_class_get_namespace) return NO;
+    const char* mName = il2cpp_method_get_name(method);
+    if (!mName || strcmp(mName, "OnBattleUpdate") != 0) return NO;
+    void* klass = il2cpp_method_get_class(method);
+    if (!klass) return NO;
+    const char* kName = il2cpp_class_get_name(klass);
+    const char* kNs = il2cpp_class_get_namespace(klass);
+    if (kName && kNs && strcmp(kName, "PlayerLogic") == 0 && strcmp(kNs, "WE.Battle.Logic") == 0) {
+        gMiOnBattleUpdate = (MethodInfo*)method; // cache for fast checks
+        logToFile(@"[INFO] Matched PlayerLogic.OnBattleUpdate via runtime invoke");
+        return YES;
+    }
+    return NO;
+}
+
+void* hook_il2cpp_runtime_invoke(void* method, void* obj, void** params, void** exc) {
+    if (!orig_il2cpp_runtime_invoke) return NULL;
+    if (gInvokeDepth > 0) return orig_il2cpp_runtime_invoke(method, obj, params, exc);
+    if (!isTargetOnBattleUpdate(method)) return orig_il2cpp_runtime_invoke(method, obj, params, exc);
+
+    gInvokeDepth++;
+    refreshToggle();
+
+    if (obj && gGodModeEnabled) {
+        if (gMiSetGM) {
+            bool enable = true;
+            void* args[1] = { &enable };
+            orig_il2cpp_runtime_invoke((void*)gMiSetGM, obj, args, NULL);
+            if (!isGodModeApplied) {
+                logToFile(@"[GOD] Applied GMNoDamage=TRUE via runtime invoke!");
+                isGodModeApplied = YES;
+            }
+        }
+
+        if (gMiHpMax) {
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - lastHpBoost > 1.0) {
+                orig_il2cpp_runtime_invoke((void*)gMiHpMax, obj, NULL, NULL);
+                lastHpBoost = now;
+            }
+        }
+    }
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastHookLog > 10.0) {
+        logToFile(@"[HOOK] il2cpp_runtime_invoke -> PlayerLogic.OnBattleUpdate");
+        lastHookLog = now;
+    }
+
+    void* ret = orig_il2cpp_runtime_invoke(method, obj, params, exc);
+    gInvokeDepth--;
+    return ret;
+}
+
 // ============================================================================
 // SETUP
 // ============================================================================
@@ -245,6 +327,10 @@ bool setupHooksOnce() {
     MethodInfo* miHpMax = findMethodInfo(logicClass, "SetPlayerHpToMax");
     MethodInfo* miUpdate = findMethodInfo(logicClass, "OnBattleUpdate");
 
+    gMiSetGM = miSetGM;
+    gMiHpMax = miHpMax;
+    gMiOnBattleUpdate = miUpdate;
+
     SetGMNoDamage = (void (*)(void*, bool))getMethodPointer(miSetGM);
     DoInvincible = (void (*)(void*, float))getMethodPointer(miInv);
     SetPlayerHpToMax = (void (*)(void*))getMethodPointer(miHpMax);
@@ -253,6 +339,18 @@ bool setupHooksOnce() {
     logToFile([NSString stringWithFormat:@"[INIT] set_GMNoDamage: %p", SetGMNoDamage]);
     logToFile([NSString stringWithFormat:@"[INIT] SetPlayerHpToMax: %p", SetPlayerHpToMax]);
     logToFile([NSString stringWithFormat:@"[INIT] OnBattleUpdate: %p", updateMethod]);
+    logToFile([NSString stringWithFormat:@"[INIT] miSetGMNoDamage: %p", miSetGM]);
+    logToFile([NSString stringWithFormat:@"[INIT] miSetPlayerHpToMax: %p", miHpMax]);
+    logToFile([NSString stringWithFormat:@"[INIT] miOnBattleUpdate: %p", miUpdate]);
+
+    if (runtimeInvokeHooked) {
+        if (!miSetGM || !miUpdate) {
+            logToFile(@"[WAIT] MethodInfo not ready for runtime invoke hook; retrying...");
+            return false;
+        }
+        logToFile(@"[INFO] Using il2cpp_runtime_invoke hook; skipping direct method hook.");
+        return true;
+    }
 
     if (!SetGMNoDamage || !updateMethod) {
         logToFile(@"[WAIT] Method pointers not ready (may be interpreted); retrying...");
@@ -267,7 +365,7 @@ bool setupHooksOnce() {
 void scheduleSetupRetry() {
     if (hooksInstalled) return;
     setupAttempts++;
-    if (setupAttempts > 60) {
+    if (setupAttempts > 180) {
         logToFile(@"[ERR] Setup retries exceeded. Hooks not installed.");
         return;
     }
@@ -283,9 +381,18 @@ void scheduleSetupRetry() {
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V16 Loading...");
+    NSLog(@"[Acecraft] V17 Loading...");
     initLogFile();
-    
+    loadIl2Cpp();
+
+    if (il2cpp_runtime_invoke) {
+        MSHookFunction((void*)il2cpp_runtime_invoke, (void*)hook_il2cpp_runtime_invoke, (void**)&orig_il2cpp_runtime_invoke);
+        runtimeInvokeHooked = YES;
+        logToFile(@"[HOOK] Installed il2cpp_runtime_invoke");
+    } else {
+        logToFile(@"[WARN] il2cpp_runtime_invoke not found; falling back to direct method hook.");
+    }
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         scheduleSetupRetry();
     });
