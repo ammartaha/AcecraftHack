@@ -6,13 +6,14 @@
 #import "Utils.h"
 
 // ============================================================================
-// TRACER V6 - LUA EVENT LOGGER
+// TWEAK V7 - COMBINED MOD MENU + OMNI TRACER
 // ============================================================================
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
 static BOOL isGodMode = NO;
 static UIButton *menuButton = nil;
+static UIWindow *mainWindow = nil;
 
 // ============================================================================
 // LOGGING
@@ -35,12 +36,13 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v6_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v7_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V6: LUA EVENT LOGGER ===");
+    logToFile(@"=== ACECRAFT TRACER V7: OMNI LOGGER ===");
+    logToFile(@"Monitoring: Player.Hit, Bullet.SetHp, Lua.Broadcast, Physics.Collision");
 }
 
 // ============================================================================
@@ -90,12 +92,37 @@ void* findClass(const char* namespaze, const char* className) {
 // HOOKS
 // ============================================================================
 
-// Hook LuaEventCenterBridge.Broadcast(int eventId)
+// 1. Player.Hit (Original Candidate)
+static void (*orig_Player_Hit)(void* self);
+void hook_Player_Hit(void* self) {
+    logToFile([NSString stringWithFormat:@"[PLAYER] Hit called! GodMode: %d", isGodMode]);
+    if (isGodMode) return;
+    if (orig_Player_Hit) orig_Player_Hit(self);
+}
+
+// 2. Lua Event Broadcast (Likely Candidate)
 static void (*orig_Broadcast)(void* self, int eventId);
 void hook_Broadcast(void* self, int eventId) {
-    logToFile([NSString stringWithFormat:@"[LUA] Broadcast event: %d", eventId]);
+    // Filter out common spam events if needed, but for now log all
+    logToFile([NSString stringWithFormat:@"[LUA] Broadcast ID: %d", eventId]);
     if (orig_Broadcast) orig_Broadcast(self, eventId);
 }
+
+// 3. Bullet SetHp (Enemy Damage)
+static void (*orig_Bullet_SetHp)(void* self, struct FP hp);
+void hook_Bullet_SetHp(void* self, struct FP hp) {
+    float val = FPToFloat(hp);
+    logToFile([NSString stringWithFormat:@"[BULLET] SetHp: %.2f", val]);
+    if (orig_Bullet_SetHp) orig_Bullet_SetHp(self, hp);
+}
+
+// 4. Physics Collision (FSBodyComponent)
+static void (*orig_OnCollisionEnter)(void* self, void* collision);
+void hook_OnCollisionEnter(void* self, void* collision) {
+    logToFile(@"[PHYSICS] OnCollisionEnter");
+    if (orig_OnCollisionEnter) orig_OnCollisionEnter(self, collision);
+}
+
 
 // Helper to install hook by name
 void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** origPtr) {
@@ -106,8 +133,7 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
     while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
         const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
         
-        // We only hook the simple 'Broadcast(int)' for now
-        // Checking arg count would be better but name is unique enough here
+        // Exact match
         if (strcmp(mName, methodName) == 0) {
             void* ptr = *(void**)method;
             if (ptr) {
@@ -123,56 +149,69 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
 // ============================================================================
 // UI
 // ============================================================================
-// (Keeping simple UI from V5)
 @interface ModMenuController : NSObject
 + (void)showMenu;
 @end
 
 @implementation ModMenuController
+
 + (void)showMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V6"
-                                                                   message:@"Lua & Physics Tracer"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V7"
+                                                                   message:@"Mod Menu + Omni Tracer"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     
-    NSString *godModeTitle = isGodMode ? @"Logging: ON ✅" : @"Logging: OFF ❌";
-    [alert addAction:[UIAlertAction actionWithTitle:godModeTitle
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * action) {
-        isGodMode = !isGodMode; // Just using this bool to toggle logs potentially
-        logToFile([NSString stringWithFormat:@"[UI] Logging toggled: %d", isGodMode]);
-        [self showMenu];
-    }]];
+    // Toggle God Mode
+    NSString *godModeTitle = isGodMode ? @"God Mode: ON ✅" : @"God Mode: OFF ❌";
+    UIAlertAction *godModeAction = [UIAlertAction actionWithTitle:godModeTitle
+                                                            style:UIAlertActionStyleDefault
+                                                          handler:^(UIAlertAction * action) {
+        isGodMode = !isGodMode;
+        logToFile([NSString stringWithFormat:@"[UI] God Mode toggled: %d", isGodMode]);
+        [self showMenu]; 
+    }];
+    [alert addAction:godModeAction];
+    
+    // Close
     [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
     
+    // Show
     UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
     if (rootVC) {
         [rootVC presentViewController:alert animated:YES completion:nil];
     }
 }
+
 @end
 
 void setupMenuButton() {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *mainWindow = [UIApplication sharedApplication].keyWindow;
+        mainWindow = [UIApplication sharedApplication].keyWindow;
         if (!mainWindow) return;
         
         menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        menuButton.frame = CGRectMake(20, 100, 60, 60);
-        menuButton.backgroundColor = [[UIColor purpleColor] colorWithAlphaComponent:0.7];
-        menuButton.layer.cornerRadius = 30;
-        [menuButton setTitle:@"V6" forState:UIControlStateNormal];
+        menuButton.frame = CGRectMake(50, 50, 50, 50);
+        menuButton.backgroundColor = [[UIColor orangeColor] colorWithAlphaComponent:0.8]; // Orange for V7
+        menuButton.layer.cornerRadius = 25;
+        menuButton.clipsToBounds = YES;
+        [menuButton setTitle:@"V7" forState:UIControlStateNormal];
+        menuButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        [menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:menuButton action:@selector(handlePan:)];
         [menuButton addGestureRecognizer:pan];
+        
         [menuButton addTarget:[ModMenuController class] action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
         
         [mainWindow addSubview:menuButton];
         [mainWindow bringSubviewToFront:menuButton];
+        
+        logToFile(@"[UI] Menu button created");
     });
 }
 
 @interface UIButton (Draggable)
 @end
+
 @implementation UIButton (Draggable)
 - (void)handlePan:(UIPanGestureRecognizer *)sender {
     CGPoint translation = [sender translationInView:self.superview];
@@ -187,20 +226,24 @@ void setupMenuButton() {
 void setupHooks() {
     loadIl2Cpp();
     
-    // Find Lua Bridge
-    // Note: Namespace is empty in dump for LuaEventCenterBridge
-    void* luaBridgeClass = findClass("", "LuaEventCenterBridge");
+    // Find Classes
+    void* playerClass = findClass("BB", "Player");
+    void* luaClass = findClass("", "LuaEventCenterBridge");
+    void* bulletClass = findClass("BB", "Bullet");
+    void* bodyClass = findClass("", "FSBodyComponent");
     
-    if (luaBridgeClass) {
-        logToFile(@"Found LuaEventCenterBridge class");
-        hookMethodByName(luaBridgeClass, "Broadcast", (void*)hook_Broadcast, (void**)&orig_Broadcast);
-    } else {
-        logToFile(@"[ERROR] LuaEventCenterBridge class NOT FOUND");
-    }
+    // Install Hooks
+    if (playerClass) hookMethodByName(playerClass, "Hit", (void*)hook_Player_Hit, (void**)&orig_Player_Hit);
+    if (luaClass) hookMethodByName(luaClass, "Broadcast", (void*)hook_Broadcast, (void**)&orig_Broadcast);
+    if (bulletClass) hookMethodByName(bulletClass, "SetHp", (void*)hook_Bullet_SetHp, (void**)&orig_Bullet_SetHp);
+    
+    // Note: FSBodyComponent might be in a different namespace or global
+    if (bodyClass) hookMethodByName(bodyClass, "OnCollisionEnter", (void*)hook_OnCollisionEnter, (void**)&orig_OnCollisionEnter);
+    else logToFile(@"[WARN] FSBodyComponent class not found via empty namespace");
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V6 Lua Tracer Loading...");
+    NSLog(@"[Acecraft] V7 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
