@@ -6,15 +6,17 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V15 - DEEP HOOKING (CONTROLLER -> LOGIC)
+// TWEAK V16 - LOGIC UPDATE HOOK (HYBRIDCLR SAFE RETRY)
 // ============================================================================
-// The PlayerController has an instance.
-// The PlayerLogic does NOT (static/singleton issue or pure object).
-// Solution: Use PlayerController to GET PlayerLogic, then abuse it.
+// Previous bug: PlayerController.get_PlayerModel() returns PlayerModel, NOT PlayerLogic.
+// Fix: Hook PlayerLogic.OnBattleUpdate and set GMNoDamage on the real logic instance.
+// HybridCLR hotfix assemblies load late, so we retry until classes/methods resolve.
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
 static BOOL isGodModeApplied = NO;
+static BOOL hooksInstalled = NO;
+static int setupAttempts = 0;
 
 // ============================================================================
 // LOGGING
@@ -42,7 +44,7 @@ void initLogFile() {
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V15: CONTROLLER PROXY ===");
+    logToFile(@"=== ACECRAFT TRACER V16: LOGIC UPDATE HOOK ===");
 }
 
 // ============================================================================
@@ -54,6 +56,8 @@ typedef void* (*il2cpp_assembly_get_image_t)(void* assembly);
 typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, const char* name);
 typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
+typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
+typedef void* (*il2cpp_method_get_pointer_t)(void* method);
 
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
@@ -61,6 +65,27 @@ static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
 static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
+static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
+static il2cpp_method_get_pointer_t il2cpp_method_get_pointer = NULL;
+
+// Minimal MethodInfo definition for methodPointer access
+typedef struct MethodInfo {
+    void* methodPointer;
+    void* virtualMethodPointer;
+    void* invoker_method;
+    const char* name;
+    void* klass;
+    const void* return_type;
+    const void* parameters;
+    void* rgctx_data;
+    void* genericMethod;
+    uint32_t token;
+    uint16_t flags;
+    uint16_t iflags;
+    uint16_t slot;
+    uint8_t parameters_count;
+    uint8_t bitflags;
+} MethodInfo;
 
 void loadIl2Cpp() {
     void* h = dlopen(NULL, RTLD_NOW);
@@ -71,6 +96,8 @@ void loadIl2Cpp() {
     il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(h, "il2cpp_class_from_name");
     il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(h, "il2cpp_class_get_methods");
     il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
+    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(h, "il2cpp_class_get_method_from_name");
+    il2cpp_method_get_pointer = (il2cpp_method_get_pointer_t)dlsym(h, "il2cpp_method_get_pointer");
 }
 
 void* findClass(const char* namespaze, const char* className) {
@@ -88,25 +115,34 @@ void* findClass(const char* namespaze, const char* className) {
     return NULL;
 }
 
-void* findMethod(void* klass, const char* methodName) {
-    if (!klass || !il2cpp_class_get_methods) return NULL;
+MethodInfo* findMethodInfo(void* klass, const char* methodName) {
+    if (!klass) return NULL;
+    if (il2cpp_class_get_method_from_name) {
+        return (MethodInfo*)il2cpp_class_get_method_from_name(klass, methodName, -1);
+    }
+    if (!il2cpp_class_get_methods) return NULL;
     void* iter = NULL;
     void* method;
     while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
         const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
         if (strcmp(mName, methodName) == 0) {
-            return *(void**)method;
+            return (MethodInfo*)method;
         }
     }
+    return NULL;
+}
+
+void* getMethodPointer(MethodInfo* method) {
+    if (!method) return NULL;
+    if (method->methodPointer) return method->methodPointer;
+    if (il2cpp_method_get_pointer) return il2cpp_method_get_pointer(method);
+    if (method->virtualMethodPointer) return method->virtualMethodPointer;
     return NULL;
 }
 
 // ============================================================================
 // METHOD POINTERS (WE WILL CALL THESE)
 // ============================================================================
-
-// PlayerController.get_PlayerModel() -> Returns PlayerLogic*
-static void* (*GetPlayerModel)(void* controller);
 
 // PlayerLogic.set_GMNoDamage(bool)
 static void (*SetGMNoDamage)(void* logic, bool enable);
@@ -118,77 +154,78 @@ static void (*DoInvincible)(void* logic, float duration);
 // HOOKS
 // ============================================================================
 
-// Hook PlayerController.Update
-// We use this to repeatedly apply God Mode to the underlying logic object
-static void (*orig_Controller_Update)(void* self);
-void hook_Controller_Update(void* self) {
-    
-    if (self && GetPlayerModel) {
-        void* logicObj = GetPlayerModel(self);
-        
-        if (logicObj) {
-            // Found the hidden logic object!
-            
-            // 1. Force GMNoDamage
-            if (SetGMNoDamage) {
-                SetGMNoDamage(logicObj, true);
-                if (!isGodModeApplied) {
-                    logToFile(@"[GOD] Applied GMNoDamage=TRUE via Controller!");
-                    isGodModeApplied = YES;
-                }
-            }
-            
-            // 2. Force Invincibility (Backup)
-            if (DoInvincible) {
-                // Apply 60 seconds of invincibility every frame (overkill but safe)
-                // DoInvincible(logicObj, 60.0f);
-            }
-            
-        } else {
-             if (isGodModeApplied) logToFile(@"[WARN] Controller.get_PlayerModel() returned NULL!");
+// Hook PlayerLogic.OnBattleUpdate
+// We use this to repeatedly apply God Mode to the logic object itself
+static void (*orig_PlayerLogic_OnBattleUpdate)(void* self, struct FP dt);
+void hook_PlayerLogic_OnBattleUpdate(void* self, struct FP dt) {
+    if (self && SetGMNoDamage) {
+        SetGMNoDamage(self, true);
+        if (!isGodModeApplied) {
+            logToFile(@"[GOD] Applied GMNoDamage=TRUE via PlayerLogic!");
+            isGodModeApplied = YES;
         }
     }
-    
-    // Call original update
-    if (orig_Controller_Update) orig_Controller_Update(self);
+    if (orig_PlayerLogic_OnBattleUpdate) orig_PlayerLogic_OnBattleUpdate(self, dt);
 }
 
 // ============================================================================
 // SETUP
 // ============================================================================
-void setupHooks() {
+bool setupHooksOnce() {
     loadIl2Cpp();
     
-    void* controllerClass = findClass("WE.Battle.View", "PlayerController");
     void* logicClass = findClass("WE.Battle.Logic", "PlayerLogic");
     
-    if (controllerClass && logicClass) {
-        
-        // 1. Get Method Pointers (So we can call them)
-        GetPlayerModel = (void* (*)(void*))findMethod(controllerClass, "get_PlayerModel");
-        SetGMNoDamage = (void (*)(void*, bool))findMethod(logicClass, "set_GMNoDamage");
-        DoInvincible = (void (*)(void*, float))findMethod(logicClass, "DoInvincible");
-        
-        logToFile([NSString stringWithFormat:@"[INIT] GetPlayerModel: %p", GetPlayerModel]);
-        logToFile([NSString stringWithFormat:@"[INIT] SetGMNoDamage: %p", SetGMNoDamage]);
-        
-        // 2. Install Hook on Update
-        void* updateMethod = findMethod(controllerClass, "Update");
-        if (updateMethod) {
-             MSHookFunction(updateMethod, (void*)hook_Controller_Update, (void**)&orig_Controller_Update);
-             logToFile(@"[HOOK] Installed PlayerController.Update");
-        }
-        
-    } else {
-        logToFile(@"[ERR] Classes NOT FOUND!");
+    if (!logicClass) {
+        logToFile(@"[WAIT] PlayerLogic class not found (HybridCLR not ready yet)");
+        return false;
     }
+
+    // Get Method Pointers (So we can call them)
+    MethodInfo* miSetGM = findMethodInfo(logicClass, "set_GMNoDamage");
+    MethodInfo* miInv = findMethodInfo(logicClass, "DoInvincible");
+    MethodInfo* miUpdate = findMethodInfo(logicClass, "OnBattleUpdate");
+
+    SetGMNoDamage = (void (*)(void*, bool))getMethodPointer(miSetGM);
+    DoInvincible = (void (*)(void*, float))getMethodPointer(miInv);
+    void* updateMethod = getMethodPointer(miUpdate);
+
+    logToFile([NSString stringWithFormat:@"[INIT] set_GMNoDamage: %p", SetGMNoDamage]);
+    logToFile([NSString stringWithFormat:@"[INIT] OnBattleUpdate: %p", updateMethod]);
+
+    if (!SetGMNoDamage || !updateMethod) {
+        logToFile(@"[WAIT] Method pointers not ready (may be interpreted); retrying...");
+        return false;
+    }
+
+    MSHookFunction(updateMethod, (void*)hook_PlayerLogic_OnBattleUpdate, (void**)&orig_PlayerLogic_OnBattleUpdate);
+    logToFile(@"[HOOK] Installed PlayerLogic.OnBattleUpdate");
+    return true;
+}
+
+void scheduleSetupRetry() {
+    if (hooksInstalled) return;
+    setupAttempts++;
+    if (setupAttempts > 60) {
+        logToFile(@"[ERR] Setup retries exceeded. Hooks not installed.");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!hooksInstalled) {
+            if (setupHooksOnce()) {
+                hooksInstalled = YES;
+            } else {
+                scheduleSetupRetry();
+            }
+        }
+    });
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V15 Loading...");
+    NSLog(@"[Acecraft] V16 Loading...");
     initLogFile();
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        setupHooks();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        scheduleSetupRetry();
     });
 }
