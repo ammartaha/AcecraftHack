@@ -119,11 +119,16 @@ void hook_SendMessage(void* self, void* methodName, void* value, int options) {
     if (orig_SendMessage) orig_SendMessage(self, methodName, value, options);
 }
 
+// FORWARD DECLARATIONS (Required for class_addMethod)
+void handlePanImpl(id self, UIPanGestureRecognizer *sender);
+void sw1ChangedImpl(id self, UISwitch *sender);
+void toggleMenu(id self, SEL _cmd);
+
 // ============================================================================
 // UI: MODERN GLASSMORPHISM
 // ============================================================================
 
-void toggleMenu() {
+void toggleMenu(id self, SEL _cmd) {
     if (menuView.hidden) {
         menuView.hidden = NO;
         menuView.transform = CGAffineTransformMakeScale(0.8, 0.8);
