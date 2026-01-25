@@ -3,49 +3,17 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <CydiaSubstrate/CydiaSubstrate.h>
+#import "Utils.h"
 
 // ============================================================================
-// TRACER V4 - MEMORY INSPECTOR
+// MOD STATE
 // ============================================================================
-
-static NSString *logFilePath = nil;
-static NSFileHandle *logFileHandle = nil;
-
-static uintptr_t unityBase = 0;
+static BOOL isGodMode = NO;
+static UIButton *menuButton = nil;
+static UIWindow *mainWindow = nil;
 
 // ============================================================================
-// LOGGING
-// ============================================================================
-void logToFile(NSString *message) {
-    if (!logFileHandle) return;
-    
-    // Add simple queuing to prevent partial writes
-    @synchronized(logFileHandle) {
-        NSString *logLine = [NSString stringWithFormat:@"%@\n", message];
-        [logFileHandle writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
-        [logFileHandle synchronizeFile];
-    }
-}
-
-void initLogFile() {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *documentsDir = [paths firstObject];
-    
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
-    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
-    
-    logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v4_%@.txt", timestamp]];
-    
-    [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
-    logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
-    
-    logToFile(@"=== ACECRAFT TRACER V4: MEMORY INSPECTOR ===");
-}
-
-// ============================================================================
-// IL2CPP TYPES
+// IL2CPP TYPES & HELPERS
 // ============================================================================
 typedef void* (*il2cpp_domain_get_t)(void);
 typedef void* (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
@@ -61,98 +29,9 @@ static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
 
-// ============================================================================
-// MEMORY UTILS
-// ============================================================================
-uintptr_t getUnityBase() {
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (strstr(name, "UnityFramework")) {
-            return (uintptr_t)_dyld_get_image_header(i);
-        }
-    }
-    return 0;
-}
-
-// Check if a pointer is likely a code address in UnityFramework
-bool isLikelyCodePointer(void* ptr) {
-    uintptr_t addr = (uintptr_t)ptr;
-    // Allow range of 100MB from base, just heuristic
-    return (addr > unityBase && addr < unityBase + 0x10000000); 
-}
-
-// Dump struct memory to find pointers
-void dumpMemory(void* ptr, int size) {
-    if (!ptr) return;
-    
-    NSMutableString *hex = [NSMutableString string];
-    uint64_t *p = (uint64_t*)ptr;
-    
-    for (int i = 0; i < size/8; i++) {
-        uint64_t val = p[i];
-        [hex appendFormat:@"%02X: 0x%016llx ", i*8, val];
-        
-        if (isLikelyCodePointer((void*)val)) {
-            [hex appendString:@" [POSSIBLE CODE]"];
-        }
-        [hex appendString:@"\n"];
-    }
-    logToFile(hex);
-}
-
-// ============================================================================
-// INSPECT METHOD
-// ============================================================================
-void inspectMethod(void* method) {
-    if (!method) return;
-    
-    const char* name = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "?";
-    logToFile([NSString stringWithFormat:@"--- Inspecting Method: %s (%p) ---", name, method]);
-    
-    // Dump first 64 bytes of MethodInfo struct
-    dumpMemory(method, 64);
-}
-
-// ============================================================================
-// INSPECT CLASS
-// ============================================================================
-void inspectClass(const char* namespaze, const char* className) {
-    if (!il2cpp_domain_get) return;
-    
-    void* domain = il2cpp_domain_get();
-    size_t size = 0;
-    void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
-    
-    for (size_t i = 0; i < size; i++) {
-        void* image = il2cpp_assembly_get_image(assemblies[i]);
-        if (!image) continue;
-        
-        void* klass = il2cpp_class_from_name(image, namespaze, className);
-        if (klass) {
-            logToFile([NSString stringWithFormat:@"=== FOUND CLASS %s.%s ===", namespaze, className]);
-            
-            void* iter = NULL;
-            void* method;
-            while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
-                const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "?";
-                
-                // Only inspect interesting methods
-                if (strstr(mName, "SetHp") || strstr(mName, "SpawnBullet") || 
-                    strstr(mName, "Hit") || strstr(mName, "TakeDamage")) {
-                    inspectMethod(method);
-                }
-            }
-            return;
-        }
-    }
-    logToFile([NSString stringWithFormat:@"Class %s.%s NOT FOUND", namespaze, className]);
-}
-
-// ============================================================================
-// LOAD IL2CPP
-// ============================================================================
 void loadIl2Cpp() {
     void* h = dlopen(NULL, RTLD_NOW);
+    if (!h) return;
     il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(h, "il2cpp_domain_get");
     il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(h, "il2cpp_domain_get_assemblies");
     il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(h, "il2cpp_assembly_get_image");
@@ -161,35 +40,152 @@ void loadIl2Cpp() {
     il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
 }
 
-// ============================================================================
-// SETUP
-// ============================================================================
-void setup() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        unityBase = getUnityBase();
-        logToFile([NSString stringWithFormat:@"Unity Base: 0x%lx", unityBase]);
-        
-        loadIl2Cpp();
-        
-        if (!il2cpp_domain_get) {
-            logToFile(@"Failed to load il2cpp functions");
-            return;
+void* findMethod(const char* namespaze, const char* className, const char* methodName) {
+    if (!il2cpp_domain_get) return NULL;
+    void* domain = il2cpp_domain_get();
+    size_t size = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    
+    for (size_t i = 0; i < size; i++) {
+        void* image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        void* klass = il2cpp_class_from_name(image, namespaze, className);
+        if (klass) {
+            void* iter = NULL;
+            void* method;
+            while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
+                const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
+                if (strcmp(mName, methodName) == 0) {
+                    return method;
+                }
+            }
         }
-        
-        // Inspect structs to find where the pointer is living
-        inspectClass("BB", "Player");
-        inspectClass("BB", "Bullet");
-        inspectClass("BB", "BulletManager");
-        
-        logToFile(@"=== INSPECTION COMPLETE ===");
-    });
+    }
+    return NULL;
 }
 
 // ============================================================================
-// CONSTRUCTOR
+// HOOKS
 // ============================================================================
+
+// Original function pointers
+void (*orig_Player_Hit)(void* self, void* damageInfo); // Assuming unknown args
+void (*orig_Bullet_InitInfo)(void* self, void* info); // Assuming unknown args
+
+// Hook Implementations
+void hook_Player_Hit(void* self, void* damageInfo) {
+    if (isGodMode) {
+        NSLog(@"[Acecraft] Blocked Player.Hit (God Mode Active)");
+        return; // Skip damage
+    }
+    NSLog(@"[Acecraft] Player.Hit called (Normal)");
+    if (orig_Player_Hit) orig_Player_Hit(self, damageInfo);
+}
+
+// ============================================================================
+// UI
+// ============================================================================
+
+@interface ModMenuController : NSObject
++ (void)showMenu;
+@end
+
+@implementation ModMenuController
+
++ (void)showMenu {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack"
+                                                                   message:@"Coded by Ammar"
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    
+    // Toggle God Mode
+    NSString *godModeTitle = isGodMode ? @"God Mode: ON ✅" : @"God Mode: OFF ❌";
+    UIAlertAction *godModeAction = [UIAlertAction actionWithTitle:godModeTitle
+                                                            style:UIAlertActionStyleDefault
+                                                          handler:^(UIAlertAction * action) {
+        isGodMode = !isGodMode;
+        [self showMenu]; // Re-open menu to update state
+    }];
+    [alert addAction:godModeAction];
+    
+    // Close
+    [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
+    
+    // Show
+    UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+    if (rootVC) {
+        [rootVC presentViewController:alert animated:YES completion:nil];
+    }
+}
+
+@end
+
+void setupMenuButton() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        mainWindow = [UIApplication sharedApplication].keyWindow;
+        if (!mainWindow) return;
+        
+        menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        menuButton.frame = CGRectMake(50, 50, 50, 50);
+        menuButton.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+        menuButton.layer.cornerRadius = 25;
+        menuButton.clipsToBounds = YES;
+        [menuButton setTitle:@"Hack" forState:UIControlStateNormal];
+        menuButton.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        [menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        
+        // Dragging support
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:menuButton action:@selector(handlePan:)];
+        [menuButton addGestureRecognizer:pan];
+        
+        // Tap action
+        [menuButton addTarget:[ModMenuController class] action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
+        
+        [mainWindow addSubview:menuButton];
+        [mainWindow bringSubviewToFront:menuButton];
+    });
+}
+
+// Add Pan Gesture Handler Category to UIButton for simplicity
+@interface UIButton (Draggable)
+@end
+
+@implementation UIButton (Draggable)
+- (void)handlePan:(UIPanGestureRecognizer *)sender {
+    CGPoint translation = [sender translationInView:self.superview];
+    self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+    [sender setTranslation:CGPointZero inView:self.superview];
+}
+@end
+
+// ============================================================================
+// MAIN SETUP
+// ============================================================================
+void setupHooks() {
+    loadIl2Cpp();
+    
+    // Hook Player.Hit
+    void* hitMethod = findMethod("BB", "Player", "Hit");
+    if (hitMethod) {
+        // Pointer is at offset 0 based on V4 analysis
+        void* hitPtr = *(void**)hitMethod;
+        
+        if (hitPtr) {
+            MSHookFunction(hitPtr, (void*)hook_Player_Hit, (void**)&orig_Player_Hit);
+            NSLog(@"[Acecraft] Hooked BB.Player.Hit at %p", hitPtr);
+        } else {
+            NSLog(@"[Acecraft] BB.Player.Hit pointer is NULL!");
+        }
+    } else {
+        NSLog(@"[Acecraft] BB.Player.Hit method NOT FOUND!");
+    }
+}
+
 %ctor {
-    NSLog(@"[ACE] V4 Loading");
-    initLogFile();
-    setup();
+    NSLog(@"[Acecraft] Loading Mod...");
+    
+    // Delay setup to ensure Il2Cpp is initialized
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        setupHooks();
+        setupMenuButton();
+    });
 }
