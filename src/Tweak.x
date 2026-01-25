@@ -6,16 +6,12 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V9 - TARGETED LUA LOGIC HOOKS
+// TWEAK V10 - METHOD DUMPER
 // ============================================================================
-// Based on V8 Dump:
-// WE.Game.SetNoDamage (Ideal God Mode?)
-// WE.Battle.Logic.PlayerHurtEvent
-// WE.Game.PlayerLockHp
+// Goal: Find the "Execute" or "Handler" methods inside the Logic classes
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
-static BOOL isGodMode = NO;
 static UIButton *menuButton = nil;
 
 // ============================================================================
@@ -39,12 +35,12 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v9_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v10_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V9: LOGIC HOOKS ===");
+    logToFile(@"=== ACECRAFT TRACER V10: METHOD DUMPER ===");
 }
 
 // ============================================================================
@@ -91,60 +87,48 @@ void* findClass(const char* namespaze, const char* className) {
 }
 
 // ============================================================================
-// HOOKS
+// INSPECTOR
 // ============================================================================
-
-// Hook 1: WE.Game.SetNoDamage  <- This sounds like the winner!
-static void (*orig_SetNoDamage)(void* self, bool enable);
-void hook_SetNoDamage(void* self, bool enable) {
-    logToFile([NSString stringWithFormat:@"[GOD] SetNoDamage called! Arg: %d", enable]);
-    // Force enable if God Mode is on
-    if (isGodMode) {
-        logToFile(@"[GOD] Forcing SetNoDamage(true)");
-        if (orig_SetNoDamage) orig_SetNoDamage(self, true);
+void dumpMethodsForClass(const char* namespaze, const char* className) {
+    void* klass = findClass(namespaze, className);
+    if (!klass) {
+        logToFile([NSString stringWithFormat:@"[ERR] Class %s.%s NOT FOUND", namespaze, className]);
         return;
     }
-    if (orig_SetNoDamage) orig_SetNoDamage(self, enable);
-}
-
-// Hook 2: WE.Game.PlayerLockHp <- Another strong candidate
-static void (*orig_PlayerLockHp)(void* self, void* data);
-void hook_PlayerLockHp(void* self, void* data) {
-    logToFile(@"[GOD] PlayerLockHp called!");
-    if (orig_PlayerLockHp) orig_PlayerLockHp(self, data);
-}
-
-// Hook 3: WE.Battle.Logic.PlayerHurtEvent <- The likely damage trigger
-static void (*orig_PlayerHurtEvent)(void* self, void* data);
-void hook_PlayerHurtEvent(void* self, void* data) {
-    logToFile(@"[DAMAGE] PlayerHurtEvent Fired!");
-    if (isGodMode) {
-        logToFile(@"[DAMAGE] Blocked PlayerHurtEvent!");
-        return; // BLOCK IT
-    }
-    if (orig_PlayerHurtEvent) orig_PlayerHurtEvent(self, data);
-}
-
-
-// Helper to install hook by name (Partial match for safety)
-void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** origPtr) {
-    if (!klass || !il2cpp_class_get_methods) return;
+    
+    logToFile([NSString stringWithFormat:@"=== Methods for %s.%s ===", namespaze, className]);
     
     void* iter = NULL;
     void* method;
+    int count = 0;
     while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
-        const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
-        
-        if (strstr(mName, methodName)) {
-            void* ptr = *(void**)method;
-            if (ptr) {
-                MSHookFunction(ptr, hookFn, origPtr);
-                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s at %p", mName, ptr]);
-                return;
-            }
-        }
+        const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "?";
+        void* ptr = *(void**)method;
+        logToFile([NSString stringWithFormat:@"  %s () -> %p", mName, ptr]);
+        count++;
     }
-    logToFile([NSString stringWithFormat:@"[WARN] Method %s NOT FOUND", methodName]);
+    if (count == 0) logToFile(@"  (No methods found or dump failed)");
+}
+
+void inspectLogicClasses() {
+    logToFile(@"Starting Method Dump...");
+    
+    // 1. The main Player Logic System
+    dumpMethodsForClass("WE.Battle.Logic", "PlayerLogic");
+    
+    // 2. The God Mode switch
+    dumpMethodsForClass("WE.Game", "SetNoDamage");
+    
+    // 3. The Hurt Event (Does it have an Execute?)
+    dumpMethodsForClass("WE.Battle.Logic", "PlayerHurtEvent");
+    
+    // 4. Force HP Lock
+    dumpMethodsForClass("WE.Game", "PlayerLockHp");
+    
+    // 5. The Player Controller View (Frontend)
+    dumpMethodsForClass("WE.Battle.View", "PlayerController");
+    
+    logToFile(@"Method Dump Complete.");
 }
 
 // ============================================================================
@@ -156,19 +140,10 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
 
 @implementation ModMenuController
 + (void)showMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V9"
-                                                                   message:@"Targeted Logic Hooks"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V10"
+                                                                   message:@"Method Dumper Running..."
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    
-    NSString *godModeTitle = isGodMode ? @"God Mode: ON ✅" : @"God Mode: OFF ❌";
-    [alert addAction:[UIAlertAction actionWithTitle:godModeTitle
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * action) {
-        isGodMode = !isGodMode;
-        logToFile([NSString stringWithFormat:@"[UI] God Mode toggled: %d", isGodMode]);
-        [self showMenu];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Dismiss" style:UIAlertActionStyleCancel handler:nil]];
     
     UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
     if (rootVC) {
@@ -183,53 +158,28 @@ void setupMenuButton() {
         if (!mainWindow) return;
         
         menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        menuButton.frame = CGRectMake(50, 100, 50, 50);
-        menuButton.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.8]; // Green for Success!
+        menuButton.frame = CGRectMake(50, 200, 50, 50);
+        menuButton.backgroundColor = [[UIColor cyanColor] colorWithAlphaComponent:0.8];
         menuButton.layer.cornerRadius = 25;
-        [menuButton setTitle:@"V9" forState:UIControlStateNormal];
+        [menuButton setTitle:@"V10" forState:UIControlStateNormal];
         
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:menuButton action:@selector(handlePan:)];
-        [menuButton addGestureRecognizer:pan];
         [menuButton addTarget:[ModMenuController class] action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
         
         [mainWindow addSubview:menuButton];
         [mainWindow bringSubviewToFront:menuButton];
     });
 }
-@interface UIButton (Draggable)
-@end
-@implementation UIButton (Draggable)
-- (void)handlePan:(UIPanGestureRecognizer *)sender {
-    CGPoint translation = [sender translationInView:self.superview];
-    self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-    [sender setTranslation:CGPointZero inView:self.superview];
-}
-@end
 
 // ============================================================================
-// SETUP
+// CONSTRUCTOR
 // ============================================================================
-void setupHooks() {
-    loadIl2Cpp();
-    
-    // Class names from V8 Log
-    void* gameSetNoDamage = findClass("WE.Game", "SetNoDamage");
-    void* playerHurtEvent = findClass("WE.Battle.Logic", "PlayerHurtEvent");
-    void* playerLockHp = findClass("WE.Game", "PlayerLockHp");
-    
-    if (gameSetNoDamage) hookMethodByName(gameSetNoDamage, "ctor", (void*)hook_SetNoDamage, (void**)&orig_SetNoDamage); // Usually constructors or 'Invoke' call these events
-    // NOTE: These are likely Event classes. We need to hook their CONSTRUCTOR or INVOKE method.
-    // The V8 log showed these as classes. Let's try hooking .ctor to see if they get instantiated on damage.
-    
-    if (playerHurtEvent) hookMethodByName(playerHurtEvent, "ctor", (void*)hook_PlayerHurtEvent, (void**)&orig_PlayerHurtEvent);
-    if (playerLockHp) hookMethodByName(playerLockHp, "ctor", (void*)hook_PlayerLockHp, (void**)&orig_PlayerLockHp);
-}
-
 %ctor {
-    NSLog(@"[Acecraft] V9 Loading...");
+    NSLog(@"[Acecraft] V10 Loading...");
     initLogFile();
+    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        setupHooks();
+        loadIl2Cpp();
+        inspectLogicClasses(); // Dump on load
         setupMenuButton();
     });
 }
