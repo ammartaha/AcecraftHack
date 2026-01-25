@@ -5,15 +5,16 @@
 #import <CydiaSubstrate/CydiaSubstrate.h>
 
 // ============================================================================
-// ADVANCED LOGGER - Traces Unity il2cpp method calls
+// ADVANCED TRACER V2 - Actually hooks found methods!
 // ============================================================================
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
 static int callCount = 0;
+static int hookCount = 0;
 
 // ============================================================================
-// LOGGING FUNCTION
+// LOGGING
 // ============================================================================
 void logToFile(NSString *message) {
     if (!logFileHandle) return;
@@ -25,8 +26,7 @@ void logToFile(NSString *message) {
     
     [logFileHandle writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
     [logFileHandle synchronizeFile];
-    
-    NSLog(@"[AcecraftLog] %@", message);
+    NSLog(@"[ACE] %@", message);
 }
 
 void initLogFile() {
@@ -38,128 +38,99 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_trace_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v2_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    NSLog(@"[AcecraftLog] Trace file: %@", logFilePath);
-    logToFile(@"=== ACECRAFT ADVANCED TRACER ===");
+    logToFile(@"=== ACECRAFT TRACER V2 - HOOKS ENABLED ===");
 }
 
 // ============================================================================
-// FIXED POINT STRUCT
-// ============================================================================
-struct FP {
-    int64_t _serializedValue;
-};
-
-// ============================================================================
-// GET UNITYFRAMEWORK BASE
-// ============================================================================
-static uintptr_t unityBase = 0;
-
-static uintptr_t getUnityFrameworkBase() {
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (strstr(name, "UnityFramework")) {
-            return (uintptr_t)_dyld_get_image_header(i);
-        }
-    }
-    return 0;
-}
-
-// ============================================================================
-// IL2CPP EXPORTS - These should work on any version!
+// IL2CPP API TYPES
 // ============================================================================
 typedef void* (*il2cpp_domain_get_t)(void);
-typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, const char* name);
-typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
-typedef void* (*il2cpp_method_get_pointer_t)(void* method);
+typedef void* (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
 typedef void* (*il2cpp_assembly_get_image_t)(void* assembly);
-typedef void** (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
-typedef const char* (*il2cpp_class_get_name_t)(void* klass);
-typedef void* (*il2cpp_string_new_t)(const char* str);
+typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, const char* name);
+typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
+typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
+typedef const char* (*il2cpp_method_get_name_t)(void* method);
+typedef void* (*il2cpp_method_get_pointer_t)(void* method);  // THIS IS KEY!
 
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
-static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
-static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
-static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
-static il2cpp_class_get_name_t il2cpp_class_get_name = NULL;
-static il2cpp_string_new_t il2cpp_string_new = NULL;
+static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
+static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
+static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
+static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
+static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
+static il2cpp_method_get_pointer_t il2cpp_method_get_pointer = NULL;
 
 // ============================================================================
-// HOOKED FUNCTIONS - Using dynamic addresses this time
+// ORIGINAL FUNCTION POINTERS
 // ============================================================================
-
-// We'll hook Unity's SendMessage to see all game communications
-typedef void (*Unity_SendMessage_t)(const char* objName, const char* methodName, const char* message);
-static Unity_SendMessage_t orig_SendMessage = NULL;
-
-void hook_SendMessage(const char* objName, const char* methodName, const char* message) {
-    logToFile([NSString stringWithFormat:@"SendMessage: %s.%s(%s)", 
-               objName ? objName : "null", 
-               methodName ? methodName : "null", 
-               message ? message : "null"]);
-    if (orig_SendMessage) orig_SendMessage(objName, methodName, message);
-}
-
-// Hook Application.Quit to detect game exit
-typedef void (*App_Quit_t)(void);
-static App_Quit_t orig_AppQuit = NULL;
-
-void hook_AppQuit(void) {
-    logToFile(@"Application.Quit called!");
-    if (orig_AppQuit) orig_AppQuit();
-}
+static void (*orig_BulletManager_SpawnBullet)(void* self, void* bulletData) = NULL;
+static void (*orig_Bullet_SetHp)(void* self, void* hp) = NULL;
+static void (*orig_Player_Hit)(void* self) = NULL;
+static void (*orig_Player_TakeDamage)(void* self, void* damage) = NULL;
+static void* (*orig_BulletManager_Spawn)(void* self, void* data) = NULL;
 
 // ============================================================================
-// IMPORT TABLE HOOKS - Hook common functions by name
+// HOOK FUNCTIONS - These will log when called!
 // ============================================================================
-void setupImportHooks() {
-    // Try to find and hook UnitySendMessage from symbols
-    void *unityHandle = dlopen(NULL, RTLD_NOW);
-    
-    // Look for UnitySendMessage - this is exported by Unity
-    void *sendMsgPtr = dlsym(unityHandle, "UnitySendMessage");
-    if (sendMsgPtr) {
-        MSHookFunction(sendMsgPtr, (void*)hook_SendMessage, (void**)&orig_SendMessage);
-        logToFile([NSString stringWithFormat:@"Hooked UnitySendMessage at %p", sendMsgPtr]);
-    } else {
-        logToFile(@"UnitySendMessage not found in exports");
-    }
-    
-    // Try to find il2cpp exports
-    il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(unityHandle, "il2cpp_domain_get");
-    il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(unityHandle, "il2cpp_class_from_name");
-    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(unityHandle, "il2cpp_class_get_method_from_name");
-    il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(unityHandle, "il2cpp_assembly_get_image");
-    il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(unityHandle, "il2cpp_domain_get_assemblies");
-    il2cpp_class_get_name = (il2cpp_class_get_name_t)dlsym(unityHandle, "il2cpp_class_get_name");
-    il2cpp_string_new = (il2cpp_string_new_t)dlsym(unityHandle, "il2cpp_string_new");
-    
-    if (il2cpp_domain_get) {
-        logToFile(@"Found il2cpp_domain_get");
-    }
-    if (il2cpp_class_from_name) {
-        logToFile(@"Found il2cpp_class_from_name");
-    }
-    if (il2cpp_class_get_method_from_name) {
-        logToFile(@"Found il2cpp_class_get_method_from_name");
+void hook_BulletManager_SpawnBullet(void* self, void* bulletData) {
+    logToFile([NSString stringWithFormat:@">>> SpawnBullet! self=%p bulletData=%p", self, bulletData]);
+    hookCount++;
+    if (orig_BulletManager_SpawnBullet) {
+        orig_BulletManager_SpawnBullet(self, bulletData);
     }
 }
 
+void hook_Bullet_SetHp(void* self, void* hp) {
+    logToFile([NSString stringWithFormat:@">>> SetHp! self=%p hp=%p", self, hp]);
+    hookCount++;
+    if (orig_Bullet_SetHp) {
+        orig_Bullet_SetHp(self, hp);
+    }
+}
+
+void hook_Player_Hit(void* self) {
+    logToFile([NSString stringWithFormat:@">>> Player.Hit! self=%p", self]);
+    hookCount++;
+    if (orig_Player_Hit) {
+        orig_Player_Hit(self);
+    }
+}
+
+void hook_Player_TakeDamage(void* self, void* damage) {
+    logToFile([NSString stringWithFormat:@">>> Player.TakeDamage! self=%p damage=%p", self, damage]);
+    hookCount++;
+    if (orig_Player_TakeDamage) {
+        orig_Player_TakeDamage(self, damage);
+    }
+}
+
+void* hook_BulletManager_Spawn(void* self, void* data) {
+    logToFile([NSString stringWithFormat:@">>> BulletManager.Spawn! self=%p", self]);
+    hookCount++;
+    if (orig_BulletManager_Spawn) {
+        return orig_BulletManager_Spawn(self, data);
+    }
+    return NULL;
+}
+
 // ============================================================================
-// DYNAMIC IL2CPP HOOKS - Find methods at runtime
+// FIND AND HOOK A METHOD
 // ============================================================================
-void* findIl2CppMethod(const char* namespaze, const char* className, const char* methodName, int argCount) {
-    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name) {
-        return NULL;
+bool findAndHookMethod(const char* namespaze, const char* className, const char* methodName, 
+                       int argCount, void* hookFunc, void** origFunc) {
+    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_method_get_pointer) {
+        return false;
     }
     
     void* domain = il2cpp_domain_get();
-    if (!domain) return NULL;
+    if (!domain) return false;
     
     size_t size = 0;
     void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
@@ -172,92 +143,157 @@ void* findIl2CppMethod(const char* namespaze, const char* className, const char*
         if (klass) {
             void* method = il2cpp_class_get_method_from_name(klass, methodName, argCount);
             if (method) {
-                logToFile([NSString stringWithFormat:@"Found %s.%s.%s", namespaze, className, methodName]);
-                // Note: Need il2cpp_method_get_pointer to get actual address
-                return method;
+                // GET THE ACTUAL FUNCTION POINTER!
+                void* funcPtr = il2cpp_method_get_pointer(method);
+                if (funcPtr) {
+                    MSHookFunction(funcPtr, hookFunc, origFunc);
+                    logToFile([NSString stringWithFormat:@"HOOKED %s.%s.%s at %p", 
+                               namespaze, className, methodName, funcPtr]);
+                    return true;
+                } else {
+                    logToFile([NSString stringWithFormat:@"Found %s.%s.%s but couldn't get pointer", 
+                               namespaze, className, methodName]);
+                }
             }
         }
     }
     
-    return NULL;
+    return false;
 }
 
 // ============================================================================
-// OBJC METHOD SWIZZLE - Hook NSObject methods
+// LIST ALL METHODS IN A CLASS (for discovery)
 // ============================================================================
-static IMP orig_performSelector = NULL;
-
-id hook_performSelector(id self, SEL _cmd, SEL aSelector) {
-    const char* selName = sel_getName(aSelector);
-    const char* className = object_getClassName(self);
-    
-    // Log interesting selectors
-    if (strstr(selName, "damage") || strstr(selName, "health") || 
-        strstr(selName, "exp") || strstr(selName, "gold") ||
-        strstr(selName, "gem") || strstr(selName, "hit") ||
-        strstr(selName, "Damage") || strstr(selName, "Health")) {
-        logToFile([NSString stringWithFormat:@"ObjC: [%s %s]", className, selName]);
+void listClassMethods(const char* namespaze, const char* className) {
+    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_methods) {
+        return;
     }
     
-    return ((id(*)(id, SEL, SEL))orig_performSelector)(self, _cmd, aSelector);
+    void* domain = il2cpp_domain_get();
+    if (!domain) return;
+    
+    size_t size = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    
+    for (size_t i = 0; i < size; i++) {
+        void* image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        
+        void* klass = il2cpp_class_from_name(image, namespaze, className);
+        if (klass) {
+            logToFile([NSString stringWithFormat:@"=== Methods in %s.%s ===", namespaze, className]);
+            
+            void* iter = NULL;
+            void* method;
+            int count = 0;
+            while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL && count < 50) {
+                const char* name = il2cpp_method_get_name(method);
+                if (name) {
+                    logToFile([NSString stringWithFormat:@"  - %s", name]);
+                }
+                count++;
+            }
+            return;
+        }
+    }
+    
+    logToFile([NSString stringWithFormat:@"Class %s.%s not found", namespaze, className]);
 }
 
 // ============================================================================
-// SETUP ALL HOOKS
+// LOAD IL2CPP FUNCTIONS
 // ============================================================================
-void setupAdvancedHooks() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        unityBase = getUnityFrameworkBase();
-        logToFile([NSString stringWithFormat:@"UnityFramework base: 0x%lx", unityBase]);
+bool loadIl2CppFunctions() {
+    void* handle = dlopen(NULL, RTLD_NOW);
+    
+    il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(handle, "il2cpp_domain_get");
+    il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(handle, "il2cpp_domain_get_assemblies");
+    il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(handle, "il2cpp_assembly_get_image");
+    il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(handle, "il2cpp_class_from_name");
+    il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(handle, "il2cpp_class_get_methods");
+    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(handle, "il2cpp_class_get_method_from_name");
+    il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(handle, "il2cpp_method_get_name");
+    il2cpp_method_get_pointer = (il2cpp_method_get_pointer_t)dlsym(handle, "il2cpp_method_get_pointer");
+    
+    if (il2cpp_domain_get) logToFile(@"Found il2cpp_domain_get");
+    if (il2cpp_method_get_pointer) logToFile(@"Found il2cpp_method_get_pointer (CRITICAL!)");
+    
+    return il2cpp_domain_get && il2cpp_method_get_pointer;
+}
+
+// ============================================================================
+// SETUP HOOKS
+// ============================================================================
+void setupHooks() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        logToFile(@"Loading il2cpp functions...");
         
-        // Setup import-based hooks
-        setupImportHooks();
-        
-        // Try to find methods dynamically
-        logToFile(@"Searching for game methods...");
-        
-        // These will log if found
-        findIl2CppMethod("BB", "BulletManager", "SpawnBullet", 1);
-        findIl2CppMethod("BB", "Bullet", "SetHp", 1);
-        findIl2CppMethod("", "Player", "Hit", 0);
-        
-        // Swizzle NSObject performSelector to catch ObjC calls
-        Method method = class_getInstanceMethod([NSObject class], @selector(performSelector:));
-        if (method) {
-            orig_performSelector = method_setImplementation(method, (IMP)hook_performSelector);
-            logToFile(@"Swizzled NSObject performSelector:");
+        if (!loadIl2CppFunctions()) {
+            logToFile(@"ERROR: Failed to load il2cpp functions!");
+            return;
         }
         
-        logToFile(@"=== ADVANCED TRACER READY ===");
-        logToFile(@"Play the game - all interesting calls will be logged!");
+        logToFile(@"Hooking game methods...");
+        
+        // Hook BulletManager methods (namespace "BB")
+        findAndHookMethod("BB", "BulletManager", "SpawnBullet", 1, 
+                          (void*)hook_BulletManager_SpawnBullet, (void**)&orig_BulletManager_SpawnBullet);
+        
+        findAndHookMethod("BB", "BulletManager", "Spawn", 1, 
+                          (void*)hook_BulletManager_Spawn, (void**)&orig_BulletManager_Spawn);
+        
+        // Hook Bullet methods
+        findAndHookMethod("BB", "Bullet", "SetHp", 1, 
+                          (void*)hook_Bullet_SetHp, (void**)&orig_Bullet_SetHp);
+        
+        // Hook Player methods (try different namespaces)
+        findAndHookMethod("BB", "Player", "Hit", 0, 
+                          (void*)hook_Player_Hit, (void**)&orig_Player_Hit);
+        
+        findAndHookMethod("", "Player", "Hit", 0, 
+                          (void*)hook_Player_Hit, (void**)&orig_Player_Hit);
+        
+        findAndHookMethod("BB", "Player", "TakeDamage", 1, 
+                          (void*)hook_Player_TakeDamage, (void**)&orig_Player_TakeDamage);
+        
+        // List methods in key classes to discover what's available
+        logToFile(@"Discovering class methods...");
+        listClassMethods("BB", "Player");
+        listClassMethods("BB", "BulletManager");
+        listClassMethods("BB", "Bullet");
+        
+        logToFile(@"=== HOOKS INSTALLED - PLAY THE GAME! ===");
         logToFile([NSString stringWithFormat:@"Log file: %@", logFilePath]);
     });
 }
 
 // ============================================================================
-// UI STATUS
+// UI
 // ============================================================================
 static UILabel *statusLabel = nil;
 
-void setupStatusUI() {
+void setupUI() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
         
-        statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 220, 70)];
-        statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
-        statusLabel.textColor = [UIColor cyanColor];
-        statusLabel.font = [UIFont fontWithName:@"Menlo" size:9];
-        statusLabel.numberOfLines = 4;
-        statusLabel.text = @"🔍 ADVANCED TRACER\nSearching for methods...\nPlay the game!";
+        statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 200, 60)];
+        statusLabel.backgroundColor = [[UIColor purpleColor] colorWithAlphaComponent:0.8];
+        statusLabel.textColor = [UIColor whiteColor];
+        statusLabel.font = [UIFont boldSystemFontOfSize:11];
+        statusLabel.numberOfLines = 3;
+        statusLabel.text = @"🎮 TRACER V2\nWaiting...";
         statusLabel.layer.cornerRadius = 8;
         statusLabel.clipsToBounds = YES;
         statusLabel.textAlignment = NSTextAlignmentCenter;
         
         [window addSubview:statusLabel];
         
-        // Update status periodically
-        [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
-            statusLabel.text = [NSString stringWithFormat:@"🔍 ADVANCED TRACER\nCalls logged: %d\nCheck Documents/", callCount];
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            statusLabel.text = [NSString stringWithFormat:@"🎮 TRACER V2\nHooks: %d\nCalls: %d", 
+                               hookCount, callCount];
+            if (hookCount > 0) {
+                statusLabel.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.8];
+            }
         }];
     });
 }
@@ -266,11 +302,8 @@ void setupStatusUI() {
 // CONSTRUCTOR
 // ============================================================================
 %ctor {
-    NSLog(@"[AcecraftLog] ==========================================");
-    NSLog(@"[AcecraftLog] ADVANCED TRACER - Using dynamic method lookup");
-    NSLog(@"[AcecraftLog] ==========================================");
-    
+    NSLog(@"[ACE] === TRACER V2 LOADING ===");
     initLogFile();
-    setupStatusUI();
-    setupAdvancedHooks();
+    setupUI();
+    setupHooks();
 }
