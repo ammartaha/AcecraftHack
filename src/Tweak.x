@@ -6,16 +6,15 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V14 - OBJECT SNIFFER
+// TWEAK V15 - DEEP HOOKING (CONTROLLER -> LOGIC)
 // ============================================================================
-// Goal: Who is moving?
-// We hook Transform.set_position.
-// We check the class name of the object moving.
-// Only log unique names to avoid spam.
+// The PlayerController has an instance.
+// The PlayerLogic does NOT (static/singleton issue or pure object).
+// Solution: Use PlayerController to GET PlayerLogic, then abuse it.
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
-static NSMutableSet *loggedClasses = nil;
+static BOOL isGodModeApplied = NO;
 
 // ============================================================================
 // LOGGING
@@ -38,13 +37,12 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v14_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v15_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
-    loggedClasses = [[NSMutableSet alloc] init];
     
-    logToFile(@"=== ACECRAFT TRACER V14: OBJECT SNIFFER ===");
+    logToFile(@"=== ACECRAFT TRACER V15: CONTROLLER PROXY ===");
 }
 
 // ============================================================================
@@ -57,21 +55,12 @@ typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, co
 typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
 
-// Object Info
-typedef void* (*il2cpp_object_get_class_t)(void* obj);
-typedef const char* (*il2cpp_class_get_name_t)(void* klass);
-typedef const char* (*il2cpp_class_get_namespace_t)(void* klass);
-
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
 static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
 static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
-
-static il2cpp_object_get_class_t il2cpp_object_get_class = NULL;
-static il2cpp_class_get_name_t il2cpp_class_get_name = NULL;
-static il2cpp_class_get_namespace_t il2cpp_class_get_namespace = NULL;
 
 void loadIl2Cpp() {
     void* h = dlopen(NULL, RTLD_NOW);
@@ -82,10 +71,6 @@ void loadIl2Cpp() {
     il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(h, "il2cpp_class_from_name");
     il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(h, "il2cpp_class_get_methods");
     il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
-    
-    il2cpp_object_get_class = (il2cpp_object_get_class_t)dlsym(h, "il2cpp_object_get_class");
-    il2cpp_class_get_name = (il2cpp_class_get_name_t)dlsym(h, "il2cpp_class_get_name");
-    il2cpp_class_get_namespace = (il2cpp_class_get_namespace_t)dlsym(h, "il2cpp_class_get_namespace");
 }
 
 void* findClass(const char* namespaze, const char* className) {
@@ -103,60 +88,69 @@ void* findClass(const char* namespaze, const char* className) {
     return NULL;
 }
 
-// ============================================================================
-// HOOKS
-// ============================================================================
-
-struct Vector3 { float x, y, z; };
-
-// UnityEngine.Transform.set_position(Vector3)
-static void (*orig_set_position)(void* self, struct Vector3 pos);
-void hook_set_position(void* self, struct Vector3 pos) {
-    
-    // Inspect who is moving!
-    if (il2cpp_object_get_class && il2cpp_class_get_name && self) {
-        void* klass = il2cpp_object_get_class(self);
-        if (klass) {
-            const char* name = il2cpp_class_get_name(klass);
-            const char* ns = il2cpp_class_get_namespace(klass);
-            NSString *className = [NSString stringWithFormat:@"%s.%s", ns ? ns : "", name];
-            
-            // Filter common spam
-            if (![className containsString:@"UnityEngine"] && 
-                ![className containsString:@"UI"] &&
-                ![className containsString:@"Canvas"]) {
-                
-                @synchronized(loggedClasses) {
-                    if (![loggedClasses containsObject:className]) {
-                        logToFile([NSString stringWithFormat:@"[MOVE] Active Object: %@", className]);
-                        [loggedClasses addObject:className];
-                    }
-                }
-            }
-        }
-    }
-    
-    if (orig_set_position) orig_set_position(self, pos);
-}
-
-// Helper query method by name
-void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** origPtr) {
-    if (!klass || !il2cpp_class_get_methods) return;
-    
+void* findMethod(void* klass, const char* methodName) {
+    if (!klass || !il2cpp_class_get_methods) return NULL;
     void* iter = NULL;
     void* method;
     while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
         const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
         if (strcmp(mName, methodName) == 0) {
-            void* ptr = *(void**)method;
-            if (ptr) {
-                MSHookFunction(ptr, hookFn, origPtr);
-                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s @ %p", mName, ptr]);
-                return;
-            }
+            return *(void**)method;
         }
     }
-    logToFile([NSString stringWithFormat:@"[WARN] Method %s NOT FOUND", methodName]);
+    return NULL;
+}
+
+// ============================================================================
+// METHOD POINTERS (WE WILL CALL THESE)
+// ============================================================================
+
+// PlayerController.get_PlayerModel() -> Returns PlayerLogic*
+static void* (*GetPlayerModel)(void* controller);
+
+// PlayerLogic.set_GMNoDamage(bool)
+static void (*SetGMNoDamage)(void* logic, bool enable);
+
+// PlayerLogic.DoInvincible(float)
+static void (*DoInvincible)(void* logic, float duration);
+
+// ============================================================================
+// HOOKS
+// ============================================================================
+
+// Hook PlayerController.Update
+// We use this to repeatedly apply God Mode to the underlying logic object
+static void (*orig_Controller_Update)(void* self);
+void hook_Controller_Update(void* self) {
+    
+    if (self && GetPlayerModel) {
+        void* logicObj = GetPlayerModel(self);
+        
+        if (logicObj) {
+            // Found the hidden logic object!
+            
+            // 1. Force GMNoDamage
+            if (SetGMNoDamage) {
+                SetGMNoDamage(logicObj, true);
+                if (!isGodModeApplied) {
+                    logToFile(@"[GOD] Applied GMNoDamage=TRUE via Controller!");
+                    isGodModeApplied = YES;
+                }
+            }
+            
+            // 2. Force Invincibility (Backup)
+            if (DoInvincible) {
+                // Apply 60 seconds of invincibility every frame (overkill but safe)
+                // DoInvincible(logicObj, 60.0f);
+            }
+            
+        } else {
+             if (isGodModeApplied) logToFile(@"[WARN] Controller.get_PlayerModel() returned NULL!");
+        }
+    }
+    
+    // Call original update
+    if (orig_Controller_Update) orig_Controller_Update(self);
 }
 
 // ============================================================================
@@ -165,20 +159,33 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
 void setupHooks() {
     loadIl2Cpp();
     
-    // Hook Transform.set_position
-    // Note: Transform is in UnityEngine.CoreModule.dll, usually "UnityEngine.Transform"
-    void* transformClass = findClass("UnityEngine", "Transform");
+    void* controllerClass = findClass("WE.Battle.View", "PlayerController");
+    void* logicClass = findClass("WE.Battle.Logic", "PlayerLogic");
     
-    if (transformClass) {
-        logToFile(@"[INFO] Hooking UnityEngine.Transform...");
-        hookMethodByName(transformClass, "set_position", (void*)hook_set_position, (void**)&orig_set_position);
+    if (controllerClass && logicClass) {
+        
+        // 1. Get Method Pointers (So we can call them)
+        GetPlayerModel = (void* (*)(void*))findMethod(controllerClass, "get_PlayerModel");
+        SetGMNoDamage = (void (*)(void*, bool))findMethod(logicClass, "set_GMNoDamage");
+        DoInvincible = (void (*)(void*, float))findMethod(logicClass, "DoInvincible");
+        
+        logToFile([NSString stringWithFormat:@"[INIT] GetPlayerModel: %p", GetPlayerModel]);
+        logToFile([NSString stringWithFormat:@"[INIT] SetGMNoDamage: %p", SetGMNoDamage]);
+        
+        // 2. Install Hook on Update
+        void* updateMethod = findMethod(controllerClass, "Update");
+        if (updateMethod) {
+             MSHookFunction(updateMethod, (void*)hook_Controller_Update, (void**)&orig_Controller_Update);
+             logToFile(@"[HOOK] Installed PlayerController.Update");
+        }
+        
     } else {
-        logToFile(@"[ERR] UnityEngine.Transform NOT FOUND!");
+        logToFile(@"[ERR] Classes NOT FOUND!");
     }
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V14 Loading...");
+    NSLog(@"[Acecraft] V15 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
