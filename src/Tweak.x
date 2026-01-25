@@ -2,6 +2,7 @@
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <CydiaSubstrate/CydiaSubstrate.h>
 #import "Utils.h"
 
@@ -14,9 +15,14 @@
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
+static NSString *toggleFilePath = nil;
 static BOOL isGodModeApplied = NO;
 static BOOL hooksInstalled = NO;
+static BOOL gGodModeEnabled = YES;
 static int setupAttempts = 0;
+static CFAbsoluteTime lastToggleCheck = 0;
+static CFAbsoluteTime lastHookLog = 0;
+static CFAbsoluteTime lastHpBoost = 0;
 
 // ============================================================================
 // LOGGING
@@ -39,12 +45,19 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v15_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v16_%@.txt", timestamp]];
+    toggleFilePath = [documentsDir stringByAppendingPathComponent:@"acecraft_toggle.txt"];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
+    // Create toggle file if missing (default enabled)
+    if (![[NSFileManager defaultManager] fileExistsAtPath:toggleFilePath]) {
+        [@"1" writeToFile:toggleFilePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    
     logToFile(@"=== ACECRAFT TRACER V16: LOGIC UPDATE HOOK ===");
+    logToFile([NSString stringWithFormat:@"[INFO] Toggle file: %@", toggleFilePath]);
 }
 
 // ============================================================================
@@ -150,22 +163,67 @@ static void (*SetGMNoDamage)(void* logic, bool enable);
 // PlayerLogic.DoInvincible(float)
 static void (*DoInvincible)(void* logic, float duration);
 
+// PlayerLogic.SetPlayerHpToMax()
+static void (*SetPlayerHpToMax)(void* logic);
+
 // ============================================================================
 // HOOKS
 // ============================================================================
 
-// Hook PlayerLogic.OnBattleUpdate
-// We use this to repeatedly apply God Mode to the logic object itself
-static void (*orig_PlayerLogic_OnBattleUpdate)(void* self, struct FP dt);
-void hook_PlayerLogic_OnBattleUpdate(void* self, struct FP dt) {
-    if (self && SetGMNoDamage) {
-        SetGMNoDamage(self, true);
-        if (!isGodModeApplied) {
-            logToFile(@"[GOD] Applied GMNoDamage=TRUE via PlayerLogic!");
-            isGodModeApplied = YES;
+static BOOL readToggleValue() {
+    if (!toggleFilePath) return YES;
+    NSError *err = nil;
+    NSString *contents = [NSString stringWithContentsOfFile:toggleFilePath encoding:NSUTF8StringEncoding error:&err];
+    if (!contents || err) return YES; // default to enabled if unreadable
+    NSString *trim = [[contents stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if ([trim isEqualToString:@"0"] || [trim isEqualToString:@"off"] || [trim isEqualToString:@"false"]) return NO;
+    return YES;
+}
+
+static void refreshToggle() {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastToggleCheck < 2.0) return;
+    lastToggleCheck = now;
+    BOOL newVal = readToggleValue();
+    if (newVal != gGodModeEnabled) {
+        gGodModeEnabled = newVal;
+        logToFile([NSString stringWithFormat:@"[TOGGLE] GodMode %s", gGodModeEnabled ? "ENABLED" : "DISABLED"]);
+        if (!gGodModeEnabled) isGodModeApplied = NO;
+    }
+}
+
+// Hook PlayerLogic.OnBattleUpdate (no params)
+static void (*orig_PlayerLogic_OnBattleUpdate)(void* self);
+void hook_PlayerLogic_OnBattleUpdate(void* self) {
+    refreshToggle();
+    
+    if (self && gGodModeEnabled) {
+        if (SetGMNoDamage) {
+            SetGMNoDamage(self, true);
+            if (!isGodModeApplied) {
+                logToFile(@"[GOD] Applied GMNoDamage=TRUE via PlayerLogic!");
+                isGodModeApplied = YES;
+            }
+        }
+        
+        // Optional safety: top off HP periodically
+        if (SetPlayerHpToMax) {
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - lastHpBoost > 1.0) {
+                SetPlayerHpToMax(self);
+                lastHpBoost = now;
+            }
         }
     }
-    if (orig_PlayerLogic_OnBattleUpdate) orig_PlayerLogic_OnBattleUpdate(self, dt);
+    
+    // Throttled heartbeat to confirm hook is running
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastHookLog > 10.0) {
+        logToFile(@"[HOOK] PlayerLogic.OnBattleUpdate tick");
+        lastHookLog = now;
+    }
+    
+    if (orig_PlayerLogic_OnBattleUpdate) orig_PlayerLogic_OnBattleUpdate(self);
 }
 
 // ============================================================================
@@ -184,13 +242,16 @@ bool setupHooksOnce() {
     // Get Method Pointers (So we can call them)
     MethodInfo* miSetGM = findMethodInfo(logicClass, "set_GMNoDamage");
     MethodInfo* miInv = findMethodInfo(logicClass, "DoInvincible");
+    MethodInfo* miHpMax = findMethodInfo(logicClass, "SetPlayerHpToMax");
     MethodInfo* miUpdate = findMethodInfo(logicClass, "OnBattleUpdate");
 
     SetGMNoDamage = (void (*)(void*, bool))getMethodPointer(miSetGM);
     DoInvincible = (void (*)(void*, float))getMethodPointer(miInv);
+    SetPlayerHpToMax = (void (*)(void*))getMethodPointer(miHpMax);
     void* updateMethod = getMethodPointer(miUpdate);
 
     logToFile([NSString stringWithFormat:@"[INIT] set_GMNoDamage: %p", SetGMNoDamage]);
+    logToFile([NSString stringWithFormat:@"[INIT] SetPlayerHpToMax: %p", SetPlayerHpToMax]);
     logToFile([NSString stringWithFormat:@"[INIT] OnBattleUpdate: %p", updateMethod]);
 
     if (!SetGMNoDamage || !updateMethod) {
