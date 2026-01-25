@@ -4,103 +4,164 @@
 #import <CydiaSubstrate/CydiaSubstrate.h>
 
 // ============================================================================
-// GLOBAL TOGGLES & MULTIPLIERS
+// LOGGER MOD - Records function calls to a file
 // ============================================================================
-static BOOL isNeverDie = NO;
-static BOOL isOneHitKill = NO;
-static BOOL isHighEnergy = NO;
-static float expMultiplier = 1.0f;
-static float attackMultiplier = 1.0f;
+
+static NSString *logFilePath = nil;
+static NSFileHandle *logFileHandle = nil;
+static int callCount = 0;
 
 // ============================================================================
-// FIXED POINT STRUCT (from dump.cs)
-// FP uses 32 fractional bits, so ONE = 4294967296 (2^32)
+// LOGGING FUNCTION - Writes to file in Documents folder
+// ============================================================================
+void logToFile(NSString *message) {
+    if (!logFileHandle) return;
+    
+    NSString *timestamp = [[NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                          dateStyle:NSDateFormatterNoStyle
+                                                          timeStyle:NSDateFormatterMediumStyle] stringByAppendingString:@" "];
+    NSString *logLine = [NSString stringWithFormat:@"[%d] %@%@\n", callCount++, timestamp, message];
+    
+    [logFileHandle writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
+    [logFileHandle synchronizeFile]; // Flush immediately
+    
+    NSLog(@"[AcecraftLogger] %@", message);
+}
+
+void initLogFile() {
+    // Get Documents directory
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDir = [paths firstObject];
+    
+    // Create log file with timestamp
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
+    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+    
+    logFilePath = [documentsDir stringByAppendingPathComponent:
+                   [NSString stringWithFormat:@"acecraft_log_%@.txt", timestamp]];
+    
+    // Create file
+    [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
+    logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
+    
+    NSLog(@"[AcecraftLogger] Log file created at: %@", logFilePath);
+    logToFile(@"=== ACECRAFT FUNCTION LOGGER STARTED ===");
+    logToFile([NSString stringWithFormat:@"Log file: %@", logFilePath]);
+}
+
+// ============================================================================
+// FIXED POINT STRUCT
 // ============================================================================
 struct FP {
     int64_t _serializedValue;
 };
 
-static inline struct FP FloatToFP(float value) __attribute__((unused));
-static inline struct FP FloatToFP(float value) {
-    struct FP fp;
-    fp._serializedValue = (int64_t)(value * 4294967296.0);
-    return fp;
-}
-
-static inline float FPToFloat(struct FP value) __attribute__((unused));
 static inline float FPToFloat(struct FP value) {
     return (float)value._serializedValue / 4294967296.0f;
 }
 
-// BulletData_BB field offsets (from dump.cs line 670258)
-#define BULLETDATA_CANBEHIT_OFFSET  0x84
-#define BULLETDATA_MAXHP_OFFSET     0x88
-#define BULLETDATA_CURHP_OFFSET     0x90
-
 // ============================================================================
-// ORIGINAL FUNCTION POINTERS
+// ORIGINAL FUNCTION POINTERS - We'll hook MANY functions to see which are called
 // ============================================================================
 
-// BulletManager.SpawnBullet(BulletData_BB bulletData) - RVA: 0x453ABC
-static void (*orig_SpawnBullet)(void *self, void *bulletData);
-
-// Player.Hit() - RVA: 0x453E3C  
+// Player class
 static void (*orig_Player_Hit)(void *self);
 
-// Bullet.SetHp(FP currHp) - RVA: 0x4530C8
+// Bullet class
 static void (*orig_Bullet_SetHp)(void *self, struct FP hp);
+static void (*orig_Bullet_InitInfo)(void *self, void *bulletData);
+static void (*orig_Bullet_Destroy)(void *self);
+static void (*orig_Bullet_UpdateLife)(void *self, struct FP lifeTime);
+
+// BulletManager class
+static void (*orig_BulletManager_SpawnBullet)(void *self, void *bulletData);
+static void *(*orig_BulletManager_Spawn)(void *self, void *prefabName);
+static void (*orig_BulletManager_Destroy)(void *self, void *bullet);
+
+// BulletData_BB class
+static void (*orig_BulletData_SetPosition)(void *self, void *position);
+static void (*orig_BulletData_SetSpeed)(void *self, struct FP speed);
+static void (*orig_BulletData_Dispose)(void *self);
 
 // ============================================================================
-// HOOK: BulletManager.SpawnBullet - Modify bullets when spawned
+// HOOKS - Log everything!
 // ============================================================================
-void hook_SpawnBullet(void *self, void *bulletData) {
-    NSLog(@"[AcecraftHack] SpawnBullet called! bulletData=%p isOneHitKill=%d", bulletData, isOneHitKill);
-    
-    if (bulletData) {
-        // Get MaxHP field (offset 0x88)
-        struct FP *maxHP = (struct FP *)((uintptr_t)bulletData + BULLETDATA_MAXHP_OFFSET);
-        NSLog(@"[AcecraftHack] Original MaxHP = %lld (%.2f)", maxHP->_serializedValue, FPToFloat(*maxHP));
-        
-        if (isOneHitKill) {
-            // Set MaxHP to very low value so enemies die in one hit
-            maxHP->_serializedValue = 1; // Almost zero HP
-            NSLog(@"[AcecraftHack] Set MaxHP to 1 (One Hit Kill)");
-        }
-    }
-    
-    orig_SpawnBullet(self, bulletData);
-}
 
-// ============================================================================
-// HOOK: Player.Hit() - Block player taking damage
-// ============================================================================
 void hook_Player_Hit(void *self) {
-    NSLog(@"[AcecraftHack] Player.Hit() called! NeverDie=%d", isNeverDie);
-    
-    if (isNeverDie) {
-        NSLog(@"[AcecraftHack] BLOCKED Player.Hit (Never Die ON)");
-        return; // Don't call original = player doesn't take damage
-    }
-    
+    logToFile([NSString stringWithFormat:@"Player.Hit() called! self=%p", self]);
     orig_Player_Hit(self);
 }
 
-// ============================================================================
-// HOOK: Bullet.SetHp() - Intercept HP changes
-// ============================================================================
 void hook_Bullet_SetHp(void *self, struct FP hp) {
-    NSLog(@"[AcecraftHack] Bullet.SetHp() HP=%lld (%.2f) NeverDie=%d OneHit=%d", 
-          hp._serializedValue, FPToFloat(hp), isNeverDie, isOneHitKill);
+    logToFile([NSString stringWithFormat:@"Bullet.SetHp() self=%p HP=%lld (%.2f)", 
+               self, hp._serializedValue, FPToFloat(hp)]);
+    orig_Bullet_SetHp(self, hp);
+}
+
+void hook_Bullet_InitInfo(void *self, void *bulletData) {
+    logToFile([NSString stringWithFormat:@"Bullet.InitInfo() self=%p bulletData=%p", self, bulletData]);
+    orig_Bullet_InitInfo(self, bulletData);
+}
+
+void hook_Bullet_Destroy(void *self) {
+    logToFile([NSString stringWithFormat:@"Bullet.Destroy() self=%p", self]);
+    orig_Bullet_Destroy(self);
+}
+
+void hook_Bullet_UpdateLife(void *self, struct FP lifeTime) {
+    // This might be called frequently, so we'll log less detail
+    static int updateCount = 0;
+    if (updateCount++ % 100 == 0) { // Log every 100th call
+        logToFile([NSString stringWithFormat:@"Bullet.UpdateLife() [x100] self=%p life=%.2f", 
+                   self, FPToFloat(lifeTime)]);
+    }
+    orig_Bullet_UpdateLife(self, lifeTime);
+}
+
+void hook_BulletManager_SpawnBullet(void *self, void *bulletData) {
+    logToFile([NSString stringWithFormat:@"BulletManager.SpawnBullet() self=%p bulletData=%p", self, bulletData]);
     
-    // If One Hit Kill is on, always set HP to 0 (instant kill)
-    if (isOneHitKill) {
-        struct FP zeroHP = {0};
-        orig_Bullet_SetHp(self, zeroHP);
-        NSLog(@"[AcecraftHack] Forced HP to 0 (One Hit Kill)");
-        return;
+    // Try to read some fields from bulletData
+    if (bulletData) {
+        // MaxHP is at offset 0x88
+        struct FP *maxHP = (struct FP *)((uintptr_t)bulletData + 0x88);
+        // CanBeHit is at offset 0x84
+        bool *canBeHit = (bool *)((uintptr_t)bulletData + 0x84);
+        
+        logToFile([NSString stringWithFormat:@"  -> MaxHP=%lld (%.2f), CanBeHit=%d", 
+                   maxHP->_serializedValue, FPToFloat(*maxHP), *canBeHit]);
     }
     
-    orig_Bullet_SetHp(self, hp);
+    orig_BulletManager_SpawnBullet(self, bulletData);
+}
+
+void *hook_BulletManager_Spawn(void *self, void *prefabName) {
+    logToFile([NSString stringWithFormat:@"BulletManager.Spawn() self=%p prefabName=%p", self, prefabName]);
+    return orig_BulletManager_Spawn(self, prefabName);
+}
+
+void hook_BulletManager_Destroy_Bullet(void *self, void *bullet) {
+    logToFile([NSString stringWithFormat:@"BulletManager.Destroy() self=%p bullet=%p", self, bullet]);
+    orig_BulletManager_Destroy(self, bullet);
+}
+
+void hook_BulletData_SetPosition(void *self, void *position) {
+    static int posCount = 0;
+    if (posCount++ % 50 == 0) { // Log every 50th call
+        logToFile([NSString stringWithFormat:@"BulletData.SetPosition() [x50] self=%p", self]);
+    }
+    orig_BulletData_SetPosition(self, position);
+}
+
+void hook_BulletData_SetSpeed(void *self, struct FP speed) {
+    logToFile([NSString stringWithFormat:@"BulletData.SetSpeed() self=%p speed=%.2f", self, FPToFloat(speed)]);
+    orig_BulletData_SetSpeed(self, speed);
+}
+
+void hook_BulletData_Dispose(void *self) {
+    logToFile([NSString stringWithFormat:@"BulletData.Dispose() self=%p", self]);
+    orig_BulletData_Dispose(self);
 }
 
 // ============================================================================
@@ -119,261 +180,92 @@ static uintptr_t getUnityFrameworkBase() {
 static uintptr_t unityBase = 0;
 
 // ============================================================================
-// SETUP NATIVE HOOKS
+// SETUP ALL HOOKS
 // ============================================================================
-void setupNativeHooks() {
+void setupLoggerHooks() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         unityBase = getUnityFrameworkBase();
         if (!unityBase) {
-            NSLog(@"[AcecraftHack] ERROR: UnityFramework not found!");
+            logToFile(@"ERROR: UnityFramework not found!");
             return;
         }
-        NSLog(@"[AcecraftHack] UnityFramework base: 0x%lx", unityBase);
-        
-        // Hook BulletManager.SpawnBullet - RVA: 0x453ABC
-        void *spawnAddr = (void *)(unityBase + 0x453ABC);
-        MSHookFunction(spawnAddr, (void *)hook_SpawnBullet, (void **)&orig_SpawnBullet);
-        NSLog(@"[AcecraftHack] Hooked BulletManager.SpawnBullet at %p", spawnAddr);
+        logToFile([NSString stringWithFormat:@"UnityFramework base: 0x%lx", unityBase]);
         
         // Hook Player.Hit - RVA: 0x453E3C
-        void *hitAddr = (void *)(unityBase + 0x453E3C);
-        MSHookFunction(hitAddr, (void *)hook_Player_Hit, (void **)&orig_Player_Hit);
-        NSLog(@"[AcecraftHack] Hooked Player.Hit at %p", hitAddr);
+        MSHookFunction((void *)(unityBase + 0x453E3C), (void *)hook_Player_Hit, (void **)&orig_Player_Hit);
+        logToFile(@"Hooked Player.Hit at 0x453E3C");
         
         // Hook Bullet.SetHp - RVA: 0x4530C8
-        void *setHpAddr = (void *)(unityBase + 0x4530C8);
-        MSHookFunction(setHpAddr, (void *)hook_Bullet_SetHp, (void **)&orig_Bullet_SetHp);
-        NSLog(@"[AcecraftHack] Hooked Bullet.SetHp at %p", setHpAddr);
+        MSHookFunction((void *)(unityBase + 0x4530C8), (void *)hook_Bullet_SetHp, (void **)&orig_Bullet_SetHp);
+        logToFile(@"Hooked Bullet.SetHp at 0x4530C8");
         
-        NSLog(@"[AcecraftHack] All hooks installed successfully!");
+        // Hook Bullet.InitInfo - RVA: 0x452E10
+        MSHookFunction((void *)(unityBase + 0x452E10), (void *)hook_Bullet_InitInfo, (void **)&orig_Bullet_InitInfo);
+        logToFile(@"Hooked Bullet.InitInfo at 0x452E10");
+        
+        // Hook Bullet.Destroy - RVA: 0x453018
+        MSHookFunction((void *)(unityBase + 0x453018), (void *)hook_Bullet_Destroy, (void **)&orig_Bullet_Destroy);
+        logToFile(@"Hooked Bullet.Destroy at 0x453018");
+        
+        // Hook Bullet.UpdateLife - RVA: 0x452F84
+        MSHookFunction((void *)(unityBase + 0x452F84), (void *)hook_Bullet_UpdateLife, (void **)&orig_Bullet_UpdateLife);
+        logToFile(@"Hooked Bullet.UpdateLife at 0x452F84");
+        
+        // Hook BulletManager.SpawnBullet - RVA: 0x453ABC
+        MSHookFunction((void *)(unityBase + 0x453ABC), (void *)hook_BulletManager_SpawnBullet, (void **)&orig_BulletManager_SpawnBullet);
+        logToFile(@"Hooked BulletManager.SpawnBullet at 0x453ABC");
+        
+        // Hook BulletManager.Spawn - RVA: 0x4537A0
+        MSHookFunction((void *)(unityBase + 0x4537A0), (void *)hook_BulletManager_Spawn, (void **)&orig_BulletManager_Spawn);
+        logToFile(@"Hooked BulletManager.Spawn at 0x4537A0");
+        
+        // Hook BulletManager.Destroy - RVA: 0x4532B8
+        MSHookFunction((void *)(unityBase + 0x4532B8), (void *)hook_BulletManager_Destroy_Bullet, (void **)&orig_BulletManager_Destroy);
+        logToFile(@"Hooked BulletManager.Destroy at 0x4532B8");
+        
+        // Hook BulletData_BB.SetPosition - RVA: 0x34CEB8
+        MSHookFunction((void *)(unityBase + 0x34CEB8), (void *)hook_BulletData_SetPosition, (void **)&orig_BulletData_SetPosition);
+        logToFile(@"Hooked BulletData.SetPosition at 0x34CEB8");
+        
+        // Hook BulletData_BB.SetSpeed - RVA: 0x34D134
+        MSHookFunction((void *)(unityBase + 0x34D134), (void *)hook_BulletData_SetSpeed, (void **)&orig_BulletData_SetSpeed);
+        logToFile(@"Hooked BulletData.SetSpeed at 0x34D134");
+        
+        // Hook BulletData_BB.Dispose - RVA: 0x34EEC4
+        MSHookFunction((void *)(unityBase + 0x34EEC4), (void *)hook_BulletData_Dispose, (void **)&orig_BulletData_Dispose);
+        logToFile(@"Hooked BulletData.Dispose at 0x34EEC4");
+        
+        logToFile(@"=== ALL HOOKS INSTALLED ===");
+        logToFile(@"Play the game now! Log will record function calls.");
+        logToFile([NSString stringWithFormat:@"Log file location: %@", logFilePath]);
     });
 }
 
 // ============================================================================
-// UI: FLOATING BUTTON & MENU
+// UI: Simple status indicator
 // ============================================================================
-static UIButton *floatingButton = nil;
-static UIView *menuView = nil;
-static UIView *overlayView = nil;
+static UILabel *statusLabel = nil;
 
-@interface ModMenuController : NSObject
-+ (instancetype)shared;
-- (void)showMenu;
-- (void)hideMenu;
-@end
-
-@implementation ModMenuController
-
-+ (instancetype)shared {
-    static ModMenuController *instance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[ModMenuController alloc] init];
-    });
-    return instance;
-}
-
-- (void)handleButtonTap:(UITapGestureRecognizer *)gesture {
-    [self showMenu];
-}
-
-- (void)handleButtonDrag:(UIPanGestureRecognizer *)gesture {
-    UIView *button = gesture.view;
-    CGPoint translation = [gesture translationInView:button.superview];
-    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
-    [gesture setTranslation:CGPointZero inView:button.superview];
-}
-
-- (void)showMenu {
-    if (menuView) return;
-    
-    UIWindow *window = [[UIApplication sharedApplication] keyWindow];
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    
-    // Dark overlay
-    overlayView = [[UIView alloc] initWithFrame:screenBounds];
-    overlayView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
-    UITapGestureRecognizer *dismissTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(hideMenu)];
-    [overlayView addGestureRecognizer:dismissTap];
-    [window addSubview:overlayView];
-    
-    // Menu container
-    CGFloat menuWidth = 300;
-    CGFloat menuHeight = 400;
-    menuView = [[UIView alloc] initWithFrame:CGRectMake((screenBounds.size.width - menuWidth)/2,
-                                                         (screenBounds.size.height - menuHeight)/2,
-                                                         menuWidth, menuHeight)];
-    menuView.backgroundColor = [[UIColor colorWithRed:0.1 green:0.1 blue:0.15 alpha:0.95] colorWithAlphaComponent:0.95];
-    menuView.layer.cornerRadius = 20;
-    menuView.layer.borderWidth = 2;
-    menuView.layer.borderColor = [UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0].CGColor;
-    menuView.clipsToBounds = YES;
-    
-    // Title
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, menuWidth, 30)];
-    title.text = @"⚡ ACECRAFT HACK v3 ⚡";
-    title.textColor = [UIColor colorWithRed:1.0 green:0.4 blue:0.4 alpha:1.0];
-    title.textAlignment = NSTextAlignmentCenter;
-    title.font = [UIFont boldSystemFontOfSize:18];
-    [menuView addSubview:title];
-    
-    CGFloat yOffset = 55;
-    CGFloat rowHeight = 50;
-    
-    // Never Die
-    [self addToggleRow:@"🛡️ Never Die" y:yOffset tag:1 isOn:isNeverDie];
-    yOffset += rowHeight;
-    
-    // One Hit Kill  
-    [self addToggleRow:@"⚔️ One Hit Kill" y:yOffset tag:2 isOn:isOneHitKill];
-    yOffset += rowHeight;
-    
-    // High Energy
-    [self addToggleRow:@"⚡ High Energy" y:yOffset tag:3 isOn:isHighEnergy];
-    yOffset += rowHeight;
-    
-    // EXP Multiplier
-    UILabel *expLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 140, 30)];
-    expLabel.text = @"📈 EXP Multiplier";
-    expLabel.textColor = [UIColor whiteColor];
-    expLabel.font = [UIFont systemFontOfSize:14];
-    [menuView addSubview:expLabel];
-    
-    UITextField *expField = [[UITextField alloc] initWithFrame:CGRectMake(menuWidth - 100, yOffset, 70, 30)];
-    expField.backgroundColor = [UIColor whiteColor];
-    expField.textColor = [UIColor blackColor];
-    expField.textAlignment = NSTextAlignmentCenter;
-    expField.keyboardType = UIKeyboardTypeDecimalPad;
-    expField.text = [NSString stringWithFormat:@"%.1f", expMultiplier];
-    expField.layer.cornerRadius = 5;
-    expField.tag = 100;
-    [expField addTarget:self action:@selector(expFieldChanged:) forControlEvents:UIControlEventEditingChanged];
-    [menuView addSubview:expField];
-    yOffset += rowHeight;
-    
-    // Attack Multiplier
-    UILabel *atkLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 140, 30)];
-    atkLabel.text = @"💥 Attack Multiplier";
-    atkLabel.textColor = [UIColor whiteColor];
-    atkLabel.font = [UIFont systemFontOfSize:14];
-    [menuView addSubview:atkLabel];
-    
-    UITextField *atkField = [[UITextField alloc] initWithFrame:CGRectMake(menuWidth - 100, yOffset, 70, 30)];
-    atkField.backgroundColor = [UIColor whiteColor];
-    atkField.textColor = [UIColor blackColor];
-    atkField.textAlignment = NSTextAlignmentCenter;
-    atkField.keyboardType = UIKeyboardTypeDecimalPad;
-    atkField.text = [NSString stringWithFormat:@"%.1f", attackMultiplier];
-    atkField.layer.cornerRadius = 5;
-    atkField.tag = 101;
-    [atkField addTarget:self action:@selector(atkFieldChanged:) forControlEvents:UIControlEventEditingChanged];
-    [menuView addSubview:atkField];
-    yOffset += rowHeight + 10;
-    
-    // Debug Info
-    UILabel *debugLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, yOffset, menuWidth - 20, 30)];
-    debugLabel.text = [NSString stringWithFormat:@"Base: 0x%lX", unityBase];
-    debugLabel.textColor = [UIColor greenColor];
-    debugLabel.font = [UIFont fontWithName:@"Menlo" size:10];
-    debugLabel.textAlignment = NSTextAlignmentCenter;
-    [menuView addSubview:debugLabel];
-    yOffset += 35;
-    
-    // Close Button
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(30, menuHeight - 55, menuWidth - 60, 40);
-    closeBtn.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:1.0];
-    [closeBtn setTitle:@"CLOSE" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    closeBtn.layer.cornerRadius = 10;
-    [closeBtn addTarget:self action:@selector(hideMenu) forControlEvents:UIControlEventTouchUpInside];
-    [menuView addSubview:closeBtn];
-    
-    [window addSubview:menuView];
-}
-
-- (void)addToggleRow:(NSString *)labelText y:(CGFloat)y tag:(NSInteger)tag isOn:(BOOL)isOn {
-    CGFloat menuWidth = 300;
-    
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(20, y, 180, 30)];
-    label.text = labelText;
-    label.textColor = [UIColor whiteColor];
-    label.font = [UIFont systemFontOfSize:14];
-    [menuView addSubview:label];
-    
-    UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectMake(menuWidth - 70, y, 50, 30)];
-    toggle.on = isOn;
-    toggle.tag = tag;
-    toggle.onTintColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:1.0];
-    [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
-    [menuView addSubview:toggle];
-}
-
-- (void)hideMenu {
-    [menuView removeFromSuperview];
-    [overlayView removeFromSuperview];
-    menuView = nil;
-    overlayView = nil;
-}
-
-- (void)toggleChanged:(UISwitch *)sender {
-    switch (sender.tag) {
-        case 1:
-            isNeverDie = sender.on;
-            NSLog(@"[AcecraftHack] Never Die: %@", isNeverDie ? @"ON" : @"OFF");
-            break;
-        case 2:
-            isOneHitKill = sender.on;
-            NSLog(@"[AcecraftHack] One Hit Kill: %@", isOneHitKill ? @"ON" : @"OFF");
-            break;
-        case 3:
-            isHighEnergy = sender.on;
-            NSLog(@"[AcecraftHack] High Energy: %@", isHighEnergy ? @"ON" : @"OFF");
-            break;
-    }
-}
-
-- (void)expFieldChanged:(UITextField *)field {
-    expMultiplier = [field.text floatValue];
-    if (expMultiplier < 1.0f) expMultiplier = 1.0f;
-    NSLog(@"[AcecraftHack] EXP Multiplier: %.1f", expMultiplier);
-}
-
-- (void)atkFieldChanged:(UITextField *)field {
-    attackMultiplier = [field.text floatValue];
-    if (attackMultiplier < 1.0f) attackMultiplier = 1.0f;
-    NSLog(@"[AcecraftHack] Attack Multiplier: %.1f", attackMultiplier);
-}
-
-@end
-
-// ============================================================================
-// SETUP FLOATING BUTTON
-// ============================================================================
-void setupFloatingButton() {
+void setupStatusIndicator() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
         
-        floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        floatingButton.frame = CGRectMake(20, 120, 55, 55);
-        floatingButton.backgroundColor = [[UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:1.0] colorWithAlphaComponent:0.7];
-        floatingButton.layer.cornerRadius = 27.5;
-        floatingButton.layer.borderWidth = 2;
-        floatingButton.layer.borderColor = [UIColor whiteColor].CGColor;
-        floatingButton.clipsToBounds = YES;
-        [floatingButton setTitle:@"MOD" forState:UIControlStateNormal];
-        [floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+        statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 200, 60)];
+        statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
+        statusLabel.textColor = [UIColor greenColor];
+        statusLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+        statusLabel.numberOfLines = 3;
+        statusLabel.text = [NSString stringWithFormat:@"🔴 LOGGER ACTIVE\nCalls: %d\nCheck Documents/", callCount];
+        statusLabel.layer.cornerRadius = 5;
+        statusLabel.clipsToBounds = YES;
+        statusLabel.textAlignment = NSTextAlignmentCenter;
         
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[ModMenuController shared] action:@selector(handleButtonTap:)];
-        [floatingButton addGestureRecognizer:tap];
+        [window addSubview:statusLabel];
         
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[ModMenuController shared] action:@selector(handleButtonDrag:)];
-        [floatingButton addGestureRecognizer:pan];
-        
-        [window addSubview:floatingButton];
-        NSLog(@"[AcecraftHack] Floating button added!");
+        // Update counter periodically
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            statusLabel.text = [NSString stringWithFormat:@"🔴 LOGGER ACTIVE\nCalls: %d\nLog: Documents/", callCount];
+        }];
     });
 }
 
@@ -381,10 +273,11 @@ void setupFloatingButton() {
 // CONSTRUCTOR
 // ============================================================================
 %ctor {
-    NSLog(@"[AcecraftHack] ==========================================");
-    NSLog(@"[AcecraftHack] Tweak loaded! Version 3.0");
-    NSLog(@"[AcecraftHack] Hooks: SpawnBullet, Player.Hit, Bullet.SetHp");
-    NSLog(@"[AcecraftHack] ==========================================");
-    setupFloatingButton();
-    setupNativeHooks();
+    NSLog(@"[AcecraftLogger] ==========================================");
+    NSLog(@"[AcecraftLogger] LOGGER MODE - Recording all function calls");
+    NSLog(@"[AcecraftLogger] ==========================================");
+    
+    initLogFile();
+    setupStatusIndicator();
+    setupLoggerHooks();
 }
