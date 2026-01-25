@@ -32,40 +32,74 @@ static inline float FPToFloat(struct FP value) {
     return (float)value._serializedValue / 4294967296.0f;
 }
 
+// BulletData_BB field offsets (from dump.cs line 670258)
+#define BULLETDATA_CANBEHIT_OFFSET  0x84
+#define BULLETDATA_MAXHP_OFFSET     0x88
+#define BULLETDATA_CURHP_OFFSET     0x90
+
 // ============================================================================
 // ORIGINAL FUNCTION POINTERS
 // ============================================================================
+
+// BulletManager.SpawnBullet(BulletData_BB bulletData) - RVA: 0x453ABC
+static void (*orig_SpawnBullet)(void *self, void *bulletData);
+
+// Player.Hit() - RVA: 0x453E3C  
 static void (*orig_Player_Hit)(void *self);
+
+// Bullet.SetHp(FP currHp) - RVA: 0x4530C8
 static void (*orig_Bullet_SetHp)(void *self, struct FP hp);
 
 // ============================================================================
-// HOOK: Player.Hit() - RVA: 0x453E3C
-// Called when player takes damage - NEVER DIE feature
+// HOOK: BulletManager.SpawnBullet - Modify bullets when spawned
+// ============================================================================
+void hook_SpawnBullet(void *self, void *bulletData) {
+    NSLog(@"[AcecraftHack] SpawnBullet called! bulletData=%p isOneHitKill=%d", bulletData, isOneHitKill);
+    
+    if (bulletData) {
+        // Get MaxHP field (offset 0x88)
+        struct FP *maxHP = (struct FP *)((uintptr_t)bulletData + BULLETDATA_MAXHP_OFFSET);
+        NSLog(@"[AcecraftHack] Original MaxHP = %lld (%.2f)", maxHP->_serializedValue, FPToFloat(*maxHP));
+        
+        if (isOneHitKill) {
+            // Set MaxHP to very low value so enemies die in one hit
+            maxHP->_serializedValue = 1; // Almost zero HP
+            NSLog(@"[AcecraftHack] Set MaxHP to 1 (One Hit Kill)");
+        }
+    }
+    
+    orig_SpawnBullet(self, bulletData);
+}
+
+// ============================================================================
+// HOOK: Player.Hit() - Block player taking damage
 // ============================================================================
 void hook_Player_Hit(void *self) {
     NSLog(@"[AcecraftHack] Player.Hit() called! NeverDie=%d", isNeverDie);
+    
     if (isNeverDie) {
-        NSLog(@"[AcecraftHack] BLOCKED damage (Never Die ON)");
-        return; // Don't execute = no damage taken
+        NSLog(@"[AcecraftHack] BLOCKED Player.Hit (Never Die ON)");
+        return; // Don't call original = player doesn't take damage
     }
+    
     orig_Player_Hit(self);
 }
 
 // ============================================================================
-// HOOK: Bullet.SetHp() - RVA: 0x4530C8
-// Called when bullet/entity HP changes - ONE HIT KILL feature
+// HOOK: Bullet.SetHp() - Intercept HP changes
 // ============================================================================
 void hook_Bullet_SetHp(void *self, struct FP hp) {
-    NSLog(@"[AcecraftHack] Bullet.SetHp() HP=%lld OneHitKill=%d", hp._serializedValue, isOneHitKill);
+    NSLog(@"[AcecraftHack] Bullet.SetHp() HP=%lld (%.2f) NeverDie=%d OneHit=%d", 
+          hp._serializedValue, FPToFloat(hp), isNeverDie, isOneHitKill);
     
+    // If One Hit Kill is on, always set HP to 0 (instant kill)
     if (isOneHitKill) {
-        // Set enemy HP to 0 for instant kill
-        // Note: This affects all entities - enemies will die instantly
-        struct FP zeroHp = {0};
-        orig_Bullet_SetHp(self, zeroHp);
-        NSLog(@"[AcecraftHack] SET HP TO ZERO (One Hit Kill)");
+        struct FP zeroHP = {0};
+        orig_Bullet_SetHp(self, zeroHP);
+        NSLog(@"[AcecraftHack] Forced HP to 0 (One Hit Kill)");
         return;
     }
+    
     orig_Bullet_SetHp(self, hp);
 }
 
@@ -96,15 +130,22 @@ void setupNativeHooks() {
         }
         NSLog(@"[AcecraftHack] UnityFramework base: 0x%lx", unityBase);
         
-        // Hook Player.Hit - Never Die
+        // Hook BulletManager.SpawnBullet - RVA: 0x453ABC
+        void *spawnAddr = (void *)(unityBase + 0x453ABC);
+        MSHookFunction(spawnAddr, (void *)hook_SpawnBullet, (void **)&orig_SpawnBullet);
+        NSLog(@"[AcecraftHack] Hooked BulletManager.SpawnBullet at %p", spawnAddr);
+        
+        // Hook Player.Hit - RVA: 0x453E3C
         void *hitAddr = (void *)(unityBase + 0x453E3C);
         MSHookFunction(hitAddr, (void *)hook_Player_Hit, (void **)&orig_Player_Hit);
         NSLog(@"[AcecraftHack] Hooked Player.Hit at %p", hitAddr);
         
-        // Hook Bullet.SetHp - One Hit Kill
+        // Hook Bullet.SetHp - RVA: 0x4530C8
         void *setHpAddr = (void *)(unityBase + 0x4530C8);
         MSHookFunction(setHpAddr, (void *)hook_Bullet_SetHp, (void **)&orig_Bullet_SetHp);
         NSLog(@"[AcecraftHack] Hooked Bullet.SetHp at %p", setHpAddr);
+        
+        NSLog(@"[AcecraftHack] All hooks installed successfully!");
     });
 }
 
@@ -156,9 +197,9 @@ static UIView *overlayView = nil;
     [overlayView addGestureRecognizer:dismissTap];
     [window addSubview:overlayView];
     
-    // Menu container - centered
+    // Menu container
     CGFloat menuWidth = 300;
-    CGFloat menuHeight = 420;
+    CGFloat menuHeight = 400;
     menuView = [[UIView alloc] initWithFrame:CGRectMake((screenBounds.size.width - menuWidth)/2,
                                                          (screenBounds.size.height - menuHeight)/2,
                                                          menuWidth, menuHeight)];
@@ -170,7 +211,7 @@ static UIView *overlayView = nil;
     
     // Title
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, menuWidth, 30)];
-    title.text = @"⚡ ACECRAFT HACK ⚡";
+    title.text = @"⚡ ACECRAFT HACK v3 ⚡";
     title.textColor = [UIColor colorWithRed:1.0 green:0.4 blue:0.4 alpha:1.0];
     title.textAlignment = NSTextAlignmentCenter;
     title.font = [UIFont boldSystemFontOfSize:18];
@@ -179,19 +220,19 @@ static UIView *overlayView = nil;
     CGFloat yOffset = 55;
     CGFloat rowHeight = 50;
     
-    // ========== NEVER DIE ==========
+    // Never Die
     [self addToggleRow:@"🛡️ Never Die" y:yOffset tag:1 isOn:isNeverDie];
     yOffset += rowHeight;
     
-    // ========== ONE HIT KILL ==========
+    // One Hit Kill  
     [self addToggleRow:@"⚔️ One Hit Kill" y:yOffset tag:2 isOn:isOneHitKill];
     yOffset += rowHeight;
     
-    // ========== HIGH ENERGY ==========
-    [self addToggleRow:@"⚡ High Energy (Ultimate)" y:yOffset tag:3 isOn:isHighEnergy];
+    // High Energy
+    [self addToggleRow:@"⚡ High Energy" y:yOffset tag:3 isOn:isHighEnergy];
     yOffset += rowHeight;
     
-    // ========== EXP MULTIPLIER ==========
+    // EXP Multiplier
     UILabel *expLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 140, 30)];
     expLabel.text = @"📈 EXP Multiplier";
     expLabel.textColor = [UIColor whiteColor];
@@ -210,7 +251,7 @@ static UIView *overlayView = nil;
     [menuView addSubview:expField];
     yOffset += rowHeight;
     
-    // ========== ATTACK MULTIPLIER ==========
+    // Attack Multiplier
     UILabel *atkLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, yOffset, 140, 30)];
     atkLabel.text = @"💥 Attack Multiplier";
     atkLabel.textColor = [UIColor whiteColor];
@@ -230,13 +271,13 @@ static UIView *overlayView = nil;
     yOffset += rowHeight + 10;
     
     // Debug Info
-    UILabel *debugLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, yOffset, menuWidth - 20, 40)];
-    debugLabel.text = [NSString stringWithFormat:@"📍 Base: 0x%lX", unityBase];
-    debugLabel.textColor = [UIColor colorWithRed:0.3 green:0.8 blue:0.3 alpha:1.0];
+    UILabel *debugLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, yOffset, menuWidth - 20, 30)];
+    debugLabel.text = [NSString stringWithFormat:@"Base: 0x%lX", unityBase];
+    debugLabel.textColor = [UIColor greenColor];
     debugLabel.font = [UIFont fontWithName:@"Menlo" size:10];
     debugLabel.textAlignment = NSTextAlignmentCenter;
     [menuView addSubview:debugLabel];
-    yOffset += 45;
+    yOffset += 35;
     
     // Close Button
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -314,7 +355,6 @@ void setupFloatingButton() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
         
-        // Circular floating button - semi-transparent
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingButton.frame = CGRectMake(20, 120, 55, 55);
         floatingButton.backgroundColor = [[UIColor colorWithRed:0.9 green:0.2 blue:0.2 alpha:1.0] colorWithAlphaComponent:0.7];
@@ -326,11 +366,9 @@ void setupFloatingButton() {
         [floatingButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
         
-        // Tap to open menu
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[ModMenuController shared] action:@selector(handleButtonTap:)];
         [floatingButton addGestureRecognizer:tap];
         
-        // Drag to move
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[ModMenuController shared] action:@selector(handleButtonDrag:)];
         [floatingButton addGestureRecognizer:pan];
         
@@ -344,8 +382,8 @@ void setupFloatingButton() {
 // ============================================================================
 %ctor {
     NSLog(@"[AcecraftHack] ==========================================");
-    NSLog(@"[AcecraftHack] Tweak loaded! Version 2.0");
-    NSLog(@"[AcecraftHack] Features: Never Die, One Hit Kill, High Energy");
+    NSLog(@"[AcecraftHack] Tweak loaded! Version 3.0");
+    NSLog(@"[AcecraftHack] Hooks: SpawnBullet, Player.Hit, Bullet.SetHp");
     NSLog(@"[AcecraftHack] ==========================================");
     setupFloatingButton();
     setupNativeHooks();
