@@ -10,8 +10,7 @@
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
-static int callCount = 0;
-static int hookCount = 0;
+
 static uintptr_t unityBase = 0;
 
 // ============================================================================
