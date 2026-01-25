@@ -6,14 +6,15 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V12 - BRUTE FORCE TRACER
+// TWEAK V13 - SANITY CHECK
 // ============================================================================
-// Strategy: Hook ANY method that looks kinda like it might be related to HP/Damage.
-// If it logs, we got it.
+// Goal: Verify hooks work by hooking Update loops.
+// If this generates logs, the system works, and we just missed the damage method.
+// If this DOES NOT generate logs, our entire hooking mechanism (Il2Cpp) is broken/offset.
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
-static UIButton *menuButton = nil;
+static int updateLogCount = 0; // Prevent spamming 100GB log
 
 // ============================================================================
 // LOGGING
@@ -36,12 +37,12 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v12_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v13_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V12: BRUTE FORCE ===");
+    logToFile(@"=== ACECRAFT TRACER V13: SANITY CHECK ===");
 }
 
 // ============================================================================
@@ -88,81 +89,41 @@ void* findClass(const char* namespaze, const char* className) {
 }
 
 // ============================================================================
-// BRUTE FORCE HOOKS
+// HOOKS
 // ============================================================================
-// We define individual hooks for each target to ensure we capture checking.
-// Most Unity Update/Event logic uses (void* self) or (void* self, void* arg).
 
-// --- PlayerLogic Hooks ---
-
-static void (*orig_OnHPChange)(void* self);
-void hook_OnHPChange(void* self) {
-    logToFile(@"[TRACE] PlayerLogic.OnHPChange");
-    if (orig_OnHPChange) orig_OnHPChange(self);
+// 1. Controller Update (View) - Should fire every frame
+static void (*orig_Controller_Update)(void* self);
+void hook_Controller_Update(void* self) {
+    if (updateLogCount < 50) {
+        logToFile(@"[ALIVE] PlayerController.Update() is RUNNING");
+        updateLogCount++;
+    }
+    if (orig_Controller_Update) orig_Controller_Update(self);
 }
 
-static void (*orig_UpdateHPAttribute)(void* self);
-void hook_UpdateHPAttribute(void* self) {
-    logToFile(@"[TRACE] PlayerLogic.UpdateHPAttribute");
-    if (orig_UpdateHPAttribute) orig_UpdateHPAttribute(self);
+// 2. Logic Battle Update - Should fire every tick
+static void (*orig_Logic_OnBattleUpdate)(void* self);
+void hook_Logic_OnBattleUpdate(void* self) {
+    if (updateLogCount < 100) { // Allow more for this one
+        logToFile(@"[ALIVE] PlayerLogic.OnBattleUpdate() is RUNNING");
+        updateLogCount++;
+    }
+    if (orig_Logic_OnBattleUpdate) orig_Logic_OnBattleUpdate(self);
 }
 
-static void (*orig_OnCollision)(void* self, void* collision);
-void hook_OnCollision(void* self, void* collision) {
-    logToFile(@"[TRACE] PlayerLogic.OnCollision");
-    if (orig_OnCollision) orig_OnCollision(self, collision);
+// 3. Global Damage (WE.Game)
+static void (*orig_DoingDamage)(void* self, void* data);
+void hook_DoingDamage(void* self, void* data) {
+    logToFile(@"[DMG] WE.Game.DoingDamage Called!");
+    if (orig_DoingDamage) orig_DoingDamage(self, data);
 }
 
-static void (*orig_OnAttacked)(void* self, void* info);
-void hook_OnAttacked(void* self, void* info) {
-    logToFile(@"[TRACE] PlayerLogic.OnAttacked");
-    if (orig_OnAttacked) orig_OnAttacked(self, info);
-}
-
-static void (*orig_DoInvincible)(void* self, float time);
-void hook_DoInvincible(void* self, float time) {
-    logToFile([NSString stringWithFormat:@"[TRACE] PlayerLogic.DoInvincible(%.2f)", time]);
-    if (orig_DoInvincible) orig_DoInvincible(self, time);
-}
-
-static void (*orig_OnDie)(void* self);
-void hook_OnDie(void* self) {
-    logToFile(@"[TRACE] PlayerLogic.OnDie");
-    if (orig_OnDie) orig_OnDie(self);
-}
-
-static void (*orig_Dead)(void* self);
-void hook_Dead(void* self) {
-    logToFile(@"[TRACE] PlayerLogic.Dead");
-    if (orig_Dead) orig_Dead(self);
-}
-
-static void (*orig_Heal)(void* self, void* amt);
-void hook_Heal(void* self, void* amt) {
-    logToFile(@"[TRACE] PlayerLogic.Heal");
-    if (orig_Heal) orig_Heal(self, amt);
-}
-
-static void (*orig_AddHPShield)(void* self, void* amt);
-void hook_AddHPShield(void* self, void* amt) {
-    logToFile(@"[TRACE] PlayerLogic.AddHPShield");
-    if (orig_AddHPShield) orig_AddHPShield(self, amt);
-}
-
-// --- PlayerController (View) Hooks ---
-
-static void (*orig_OnCurHpChange)(void* self);
-void hook_OnCurHpChange(void* self) {
-    logToFile(@"[TRACE] PlayerController.OnCurHpChange (View Updated)");
-    if (orig_OnCurHpChange) orig_OnCurHpChange(self);
-}
-
-// --- SetNoDamage Hooks ---
-
-static void (*orig_ReceiveTriggerIn)(void* self, void* a, void* b);
-void hook_ReceiveTriggerIn(void* self, void* a, void* b) {
-    logToFile(@"[TRACE] SetNoDamage.ReceiveTriggerIn");
-    if (orig_ReceiveTriggerIn) orig_ReceiveTriggerIn(self, a, b);
+// 4. BB.Player (Alternative Class)
+static void (*orig_BB_SetHp)(void* self, int hp);
+void hook_BB_SetHp(void* self, int hp) {
+    logToFile([NSString stringWithFormat:@"[BB] Player.SetHp(%d)", hp]);
+    if (orig_BB_SetHp) orig_BB_SetHp(self, hp);
 }
 
 
@@ -179,50 +140,12 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
             void* ptr = *(void**)method;
             if (ptr) {
                 MSHookFunction(ptr, hookFn, origPtr);
-                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s", mName]);
+                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s @ %p", mName, ptr]);
                 return;
             }
         }
     }
     logToFile([NSString stringWithFormat:@"[WARN] Method %s NOT FOUND", methodName]);
-}
-
-// ============================================================================
-// UI
-// ============================================================================
-@interface ModMenuController : NSObject
-+ (void)showMenu;
-@end
-
-@implementation ModMenuController
-+ (void)showMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V12"
-                                                                   message:@"Brute Force Tracer"
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Dismiss" style:UIAlertActionStyleCancel handler:nil]];
-    UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
-    if (rootVC) {
-        [rootVC presentViewController:alert animated:YES completion:nil];
-    }
-}
-@end
-
-void setupMenuButton() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *mainWindow = [UIApplication sharedApplication].keyWindow;
-        if (!mainWindow) return;
-        
-        menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        menuButton.frame = CGRectMake(50, 50, 60, 60);
-        menuButton.backgroundColor = [[UIColor purpleColor] colorWithAlphaComponent:0.8];
-        menuButton.layer.cornerRadius = 30;
-        [menuButton setTitle:@"V12" forState:UIControlStateNormal];
-        
-        [menuButton addTarget:[ModMenuController class] action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
-        
-        [mainWindow addSubview:menuButton];
-        [mainWindow bringSubviewToFront:menuButton];
-    });
 }
 
 // ============================================================================
@@ -233,38 +156,35 @@ void setupHooks() {
     
     void* logicClass = findClass("WE.Battle.Logic", "PlayerLogic");
     void* viewClass = findClass("WE.Battle.View", "PlayerController");
-    void* godClass = findClass("WE.Game", "SetNoDamage");
-    
-    if (logicClass) {
-        logToFile(@"[INFO] Hooking PlayerLogic...");
-        hookMethodByName(logicClass, "OnHPChange", (void*)hook_OnHPChange, (void**)&orig_OnHPChange);
-        hookMethodByName(logicClass, "UpdateHPAttribute", (void*)hook_UpdateHPAttribute, (void**)&orig_UpdateHPAttribute);
-        hookMethodByName(logicClass, "OnCollision", (void*)hook_OnCollision, (void**)&orig_OnCollision);
-        hookMethodByName(logicClass, "OnAttacked", (void*)hook_OnAttacked, (void**)&orig_OnAttacked);
-        hookMethodByName(logicClass, "DoInvincible", (void*)hook_DoInvincible, (void**)&orig_DoInvincible);
-        hookMethodByName(logicClass, "OnDie", (void*)hook_OnDie, (void**)&orig_OnDie);
-        hookMethodByName(logicClass, "Dead", (void*)hook_Dead, (void**)&orig_Dead);
-        hookMethodByName(logicClass, "Heal", (void*)hook_Heal, (void**)&orig_Heal);
-        hookMethodByName(logicClass, "AddHPShield", (void*)hook_AddHPShield, (void**)&orig_AddHPShield);
-    }
+    void* gameClass = findClass("WE.Game", "DoingDamage");
+    void* bbClass = findClass("BB", "Player");
     
     if (viewClass) {
-        logToFile(@"[INFO] Hooking PlayerController...");
-        hookMethodByName(viewClass, "OnCurHpChange", (void*)hook_OnCurHpChange, (void**)&orig_OnCurHpChange);
+        hookMethodByName(viewClass, "Update", (void*)hook_Controller_Update, (void**)&orig_Controller_Update);
+    }
+    if (logicClass) {
+        hookMethodByName(logicClass, "OnBattleUpdate", (void*)hook_Logic_OnBattleUpdate, (void**)&orig_Logic_OnBattleUpdate);
     }
     
-    if (godClass) {
-        logToFile(@"[INFO] Hooking SetNoDamage...");
-        hookMethodByName(godClass, "ReceiveTriggerIn", (void*)hook_ReceiveTriggerIn, (void**)&orig_ReceiveTriggerIn);
+    // Attempt global damage
+    // Note: DoingDamage might be a class (Event) or a method in a class. V8 Log line 220 says "WE.Game.DoingDamage".
+    // If it's a class (Event), we hook constructor.
+    if (gameClass) {
+         hookMethodByName(gameClass, "ctor", (void*)hook_DoingDamage, (void**)&orig_DoingDamage);
+         // Also try ReceiveTriggerIn if it's a Logic node
+         hookMethodByName(gameClass, "ReceiveTriggerIn", (void*)hook_DoingDamage, (void**)&orig_DoingDamage);
+    }
+    
+    if (bbClass) {
+        hookMethodByName(bbClass, "set_Hp", (void*)hook_BB_SetHp, (void**)&orig_BB_SetHp);
     }
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V12 Loading...");
+    NSLog(@"[Acecraft] V13 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupHooks();
-        setupMenuButton();
     });
 }
