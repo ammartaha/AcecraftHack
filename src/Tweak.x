@@ -6,15 +6,16 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V13 - SANITY CHECK
+// TWEAK V14 - OBJECT SNIFFER
 // ============================================================================
-// Goal: Verify hooks work by hooking Update loops.
-// If this generates logs, the system works, and we just missed the damage method.
-// If this DOES NOT generate logs, our entire hooking mechanism (Il2Cpp) is broken/offset.
+// Goal: Who is moving?
+// We hook Transform.set_position.
+// We check the class name of the object moving.
+// Only log unique names to avoid spam.
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
-static int updateLogCount = 0; // Prevent spamming 100GB log
+static NSMutableSet *loggedClasses = nil;
 
 // ============================================================================
 // LOGGING
@@ -37,12 +38,13 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v13_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v14_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
+    loggedClasses = [[NSMutableSet alloc] init];
     
-    logToFile(@"=== ACECRAFT TRACER V13: SANITY CHECK ===");
+    logToFile(@"=== ACECRAFT TRACER V14: OBJECT SNIFFER ===");
 }
 
 // ============================================================================
@@ -55,12 +57,21 @@ typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, co
 typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
 
+// Object Info
+typedef void* (*il2cpp_object_get_class_t)(void* obj);
+typedef const char* (*il2cpp_class_get_name_t)(void* klass);
+typedef const char* (*il2cpp_class_get_namespace_t)(void* klass);
+
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
 static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
 static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
+
+static il2cpp_object_get_class_t il2cpp_object_get_class = NULL;
+static il2cpp_class_get_name_t il2cpp_class_get_name = NULL;
+static il2cpp_class_get_namespace_t il2cpp_class_get_namespace = NULL;
 
 void loadIl2Cpp() {
     void* h = dlopen(NULL, RTLD_NOW);
@@ -71,6 +82,10 @@ void loadIl2Cpp() {
     il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(h, "il2cpp_class_from_name");
     il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(h, "il2cpp_class_get_methods");
     il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
+    
+    il2cpp_object_get_class = (il2cpp_object_get_class_t)dlsym(h, "il2cpp_object_get_class");
+    il2cpp_class_get_name = (il2cpp_class_get_name_t)dlsym(h, "il2cpp_class_get_name");
+    il2cpp_class_get_namespace = (il2cpp_class_get_namespace_t)dlsym(h, "il2cpp_class_get_namespace");
 }
 
 void* findClass(const char* namespaze, const char* className) {
@@ -92,42 +107,39 @@ void* findClass(const char* namespaze, const char* className) {
 // HOOKS
 // ============================================================================
 
-// 1. Controller Update (View) - Should fire every frame
-static void (*orig_Controller_Update)(void* self);
-void hook_Controller_Update(void* self) {
-    if (updateLogCount < 50) {
-        logToFile(@"[ALIVE] PlayerController.Update() is RUNNING");
-        updateLogCount++;
+struct Vector3 { float x, y, z; };
+
+// UnityEngine.Transform.set_position(Vector3)
+static void (*orig_set_position)(void* self, struct Vector3 pos);
+void hook_set_position(void* self, struct Vector3 pos) {
+    
+    // Inspect who is moving!
+    if (il2cpp_object_get_class && il2cpp_class_get_name && self) {
+        void* klass = il2cpp_object_get_class(self);
+        if (klass) {
+            const char* name = il2cpp_class_get_name(klass);
+            const char* ns = il2cpp_class_get_namespace(klass);
+            NSString *className = [NSString stringWithFormat:@"%s.%s", ns ? ns : "", name];
+            
+            // Filter common spam
+            if (![className containsString:@"UnityEngine"] && 
+                ![className containsString:@"UI"] &&
+                ![className containsString:@"Canvas"]) {
+                
+                @synchronized(loggedClasses) {
+                    if (![loggedClasses containsObject:className]) {
+                        logToFile([NSString stringWithFormat:@"[MOVE] Active Object: %@", className]);
+                        [loggedClasses addObject:className];
+                    }
+                }
+            }
+        }
     }
-    if (orig_Controller_Update) orig_Controller_Update(self);
+    
+    if (orig_set_position) orig_set_position(self, pos);
 }
 
-// 2. Logic Battle Update - Should fire every tick
-static void (*orig_Logic_OnBattleUpdate)(void* self);
-void hook_Logic_OnBattleUpdate(void* self) {
-    if (updateLogCount < 100) { // Allow more for this one
-        logToFile(@"[ALIVE] PlayerLogic.OnBattleUpdate() is RUNNING");
-        updateLogCount++;
-    }
-    if (orig_Logic_OnBattleUpdate) orig_Logic_OnBattleUpdate(self);
-}
-
-// 3. Global Damage (WE.Game)
-static void (*orig_DoingDamage)(void* self, void* data);
-void hook_DoingDamage(void* self, void* data) {
-    logToFile(@"[DMG] WE.Game.DoingDamage Called!");
-    if (orig_DoingDamage) orig_DoingDamage(self, data);
-}
-
-// 4. BB.Player (Alternative Class)
-static void (*orig_BB_SetHp)(void* self, int hp);
-void hook_BB_SetHp(void* self, int hp) {
-    logToFile([NSString stringWithFormat:@"[BB] Player.SetHp(%d)", hp]);
-    if (orig_BB_SetHp) orig_BB_SetHp(self, hp);
-}
-
-
-// Helper to install hook by name (Partial match)
+// Helper query method by name
 void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** origPtr) {
     if (!klass || !il2cpp_class_get_methods) return;
     
@@ -135,8 +147,7 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
     void* method;
     while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
         const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
-        
-        if (strstr(mName, methodName)) {
+        if (strcmp(mName, methodName) == 0) {
             void* ptr = *(void**)method;
             if (ptr) {
                 MSHookFunction(ptr, hookFn, origPtr);
@@ -154,34 +165,20 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
 void setupHooks() {
     loadIl2Cpp();
     
-    void* logicClass = findClass("WE.Battle.Logic", "PlayerLogic");
-    void* viewClass = findClass("WE.Battle.View", "PlayerController");
-    void* gameClass = findClass("WE.Game", "DoingDamage");
-    void* bbClass = findClass("BB", "Player");
+    // Hook Transform.set_position
+    // Note: Transform is in UnityEngine.CoreModule.dll, usually "UnityEngine.Transform"
+    void* transformClass = findClass("UnityEngine", "Transform");
     
-    if (viewClass) {
-        hookMethodByName(viewClass, "Update", (void*)hook_Controller_Update, (void**)&orig_Controller_Update);
-    }
-    if (logicClass) {
-        hookMethodByName(logicClass, "OnBattleUpdate", (void*)hook_Logic_OnBattleUpdate, (void**)&orig_Logic_OnBattleUpdate);
-    }
-    
-    // Attempt global damage
-    // Note: DoingDamage might be a class (Event) or a method in a class. V8 Log line 220 says "WE.Game.DoingDamage".
-    // If it's a class (Event), we hook constructor.
-    if (gameClass) {
-         hookMethodByName(gameClass, "ctor", (void*)hook_DoingDamage, (void**)&orig_DoingDamage);
-         // Also try ReceiveTriggerIn if it's a Logic node
-         hookMethodByName(gameClass, "ReceiveTriggerIn", (void*)hook_DoingDamage, (void**)&orig_DoingDamage);
-    }
-    
-    if (bbClass) {
-        hookMethodByName(bbClass, "set_Hp", (void*)hook_BB_SetHp, (void**)&orig_BB_SetHp);
+    if (transformClass) {
+        logToFile(@"[INFO] Hooking UnityEngine.Transform...");
+        hookMethodByName(transformClass, "set_position", (void*)hook_set_position, (void**)&orig_set_position);
+    } else {
+        logToFile(@"[ERR] UnityEngine.Transform NOT FOUND!");
     }
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V13 Loading...");
+    NSLog(@"[Acecraft] V14 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
