@@ -6,11 +6,16 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V8 - CLASS DUMPER & DEBUGGER
+// TWEAK V9 - TARGETED LUA LOGIC HOOKS
 // ============================================================================
+// Based on V8 Dump:
+// WE.Game.SetNoDamage (Ideal God Mode?)
+// WE.Battle.Logic.PlayerHurtEvent
+// WE.Game.PlayerLockHp
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
+static BOOL isGodMode = NO;
 static UIButton *menuButton = nil;
 
 // ============================================================================
@@ -34,12 +39,12 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v8_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v9_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V8: CLASS DUMPER ===");
+    logToFile(@"=== ACECRAFT TRACER V9: LOGIC HOOKS ===");
 }
 
 // ============================================================================
@@ -48,22 +53,14 @@ void initLogFile() {
 typedef void* (*il2cpp_domain_get_t)(void);
 typedef void* (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
 typedef void* (*il2cpp_assembly_get_image_t)(void* assembly);
-typedef void* (*il2cpp_image_get_name_t)(void* image);
-typedef size_t (*il2cpp_image_get_class_count_t)(void* image);
-typedef void* (*il2cpp_image_get_class_t)(void* image, size_t index);
-typedef const char* (*il2cpp_class_get_name_t)(void* klass);
-typedef const char* (*il2cpp_class_get_namespace_t)(void* klass);
+typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, const char* name);
 typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
 
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
 static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = NULL;
-static il2cpp_image_get_name_t il2cpp_image_get_name = NULL;
-static il2cpp_image_get_class_count_t il2cpp_image_get_class_count = NULL;
-static il2cpp_image_get_class_t il2cpp_image_get_class = NULL;
-static il2cpp_class_get_name_t il2cpp_class_get_name = NULL;
-static il2cpp_class_get_namespace_t il2cpp_class_get_namespace = NULL;
+static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
 
@@ -73,48 +70,81 @@ void loadIl2Cpp() {
     il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(h, "il2cpp_domain_get");
     il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(h, "il2cpp_domain_get_assemblies");
     il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(h, "il2cpp_assembly_get_image");
-    il2cpp_image_get_name = (il2cpp_image_get_name_t)dlsym(h, "il2cpp_image_get_name");
-    il2cpp_image_get_class_count = (il2cpp_image_get_class_count_t)dlsym(h, "il2cpp_image_get_class_count");
-    il2cpp_image_get_class = (il2cpp_image_get_class_t)dlsym(h, "il2cpp_image_get_class");
-    il2cpp_class_get_name = (il2cpp_class_get_name_t)dlsym(h, "il2cpp_class_get_name");
-    il2cpp_class_get_namespace = (il2cpp_class_get_namespace_t)dlsym(h, "il2cpp_class_get_namespace");
+    il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(h, "il2cpp_class_from_name");
     il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(h, "il2cpp_class_get_methods");
     il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
 }
 
-// ============================================================================
-// INSPECTOR
-// ============================================================================
-void inspectClasses() {
-    if (!il2cpp_domain_get) return;
-    
-    logToFile(@"Starting Class Dump...");
+void* findClass(const char* namespaze, const char* className) {
+    if (!il2cpp_domain_get) return NULL;
     void* domain = il2cpp_domain_get();
     size_t size = 0;
     void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
     
     for (size_t i = 0; i < size; i++) {
         void* image = il2cpp_assembly_get_image(assemblies[i]);
-        const char* imgName = il2cpp_image_get_name(image);
-        logToFile([NSString stringWithFormat:@"Assembly: %s", imgName]);
+        if (!image) continue;
+        void* klass = il2cpp_class_from_name(image, namespaze, className);
+        if (klass) return klass;
+    }
+    return NULL;
+}
+
+// ============================================================================
+// HOOKS
+// ============================================================================
+
+// Hook 1: WE.Game.SetNoDamage  <- This sounds like the winner!
+static void (*orig_SetNoDamage)(void* self, bool enable);
+void hook_SetNoDamage(void* self, bool enable) {
+    logToFile([NSString stringWithFormat:@"[GOD] SetNoDamage called! Arg: %d", enable]);
+    // Force enable if God Mode is on
+    if (isGodMode) {
+        logToFile(@"[GOD] Forcing SetNoDamage(true)");
+        if (orig_SetNoDamage) orig_SetNoDamage(self, true);
+        return;
+    }
+    if (orig_SetNoDamage) orig_SetNoDamage(self, enable);
+}
+
+// Hook 2: WE.Game.PlayerLockHp <- Another strong candidate
+static void (*orig_PlayerLockHp)(void* self, void* data);
+void hook_PlayerLockHp(void* self, void* data) {
+    logToFile(@"[GOD] PlayerLockHp called!");
+    if (orig_PlayerLockHp) orig_PlayerLockHp(self, data);
+}
+
+// Hook 3: WE.Battle.Logic.PlayerHurtEvent <- The likely damage trigger
+static void (*orig_PlayerHurtEvent)(void* self, void* data);
+void hook_PlayerHurtEvent(void* self, void* data) {
+    logToFile(@"[DAMAGE] PlayerHurtEvent Fired!");
+    if (isGodMode) {
+        logToFile(@"[DAMAGE] Blocked PlayerHurtEvent!");
+        return; // BLOCK IT
+    }
+    if (orig_PlayerHurtEvent) orig_PlayerHurtEvent(self, data);
+}
+
+
+// Helper to install hook by name (Partial match for safety)
+void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** origPtr) {
+    if (!klass || !il2cpp_class_get_methods) return;
+    
+    void* iter = NULL;
+    void* method;
+    while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
+        const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
         
-        // Search specific assemblies to save time
-        if (strstr(imgName, "Assembly-CSharp") || strstr(imgName, "Logic") || strstr(imgName, "Model")) {
-            size_t classCount = il2cpp_image_get_class_count(image);
-            for (size_t j = 0; j < classCount; j++) {
-                void* klass = il2cpp_image_get_class(image, j);
-                const char* name = il2cpp_class_get_name(klass);
-                const char* ns = il2cpp_class_get_namespace(klass);
-                
-                // Filter for interesting classes
-                if (strstr(name, "Lua") || strstr(name, "Bridge") || strstr(name, "Player") || 
-                    strstr(name, "Event") || strstr(name, "Damage") || strstr(name, "Hit")) {
-                    logToFile([NSString stringWithFormat:@"  FOUND: %s.%s", ns, name]);
-                }
+        if (strstr(mName, methodName)) {
+            void* ptr = *(void**)method;
+            if (ptr) {
+                MSHookFunction(ptr, hookFn, origPtr);
+                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s at %p", mName, ptr]);
+                return;
             }
         }
     }
-    logToFile(@"Class Dump Complete.");
+    logToFile([NSString stringWithFormat:@"[WARN] Method %s NOT FOUND", methodName]);
 }
 
 // ============================================================================
@@ -126,10 +156,19 @@ void inspectClasses() {
 
 @implementation ModMenuController
 + (void)showMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V8"
-                                                                   message:@"Class Dumper Running..."
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V9"
+                                                                   message:@"Targeted Logic Hooks"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Dismiss" style:UIAlertActionStyleCancel handler:nil]];
+    
+    NSString *godModeTitle = isGodMode ? @"God Mode: ON ✅" : @"God Mode: OFF ❌";
+    [alert addAction:[UIAlertAction actionWithTitle:godModeTitle
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * action) {
+        isGodMode = !isGodMode;
+        logToFile([NSString stringWithFormat:@"[UI] God Mode toggled: %d", isGodMode]);
+        [self showMenu];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
     
     UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
     if (rootVC) {
@@ -144,28 +183,53 @@ void setupMenuButton() {
         if (!mainWindow) return;
         
         menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        menuButton.frame = CGRectMake(50, 150, 50, 50);
-        menuButton.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.8];
+        menuButton.frame = CGRectMake(50, 100, 50, 50);
+        menuButton.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.8]; // Green for Success!
         menuButton.layer.cornerRadius = 25;
-        [menuButton setTitle:@"V8" forState:UIControlStateNormal];
+        [menuButton setTitle:@"V9" forState:UIControlStateNormal];
         
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:menuButton action:@selector(handlePan:)];
+        [menuButton addGestureRecognizer:pan];
         [menuButton addTarget:[ModMenuController class] action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
         
         [mainWindow addSubview:menuButton];
         [mainWindow bringSubviewToFront:menuButton];
     });
 }
+@interface UIButton (Draggable)
+@end
+@implementation UIButton (Draggable)
+- (void)handlePan:(UIPanGestureRecognizer *)sender {
+    CGPoint translation = [sender translationInView:self.superview];
+    self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+    [sender setTranslation:CGPointZero inView:self.superview];
+}
+@end
 
 // ============================================================================
-// CONSTRUCTOR
+// SETUP
 // ============================================================================
-%ctor {
-    NSLog(@"[Acecraft] V8 Loading...");
-    initLogFile();
+void setupHooks() {
+    loadIl2Cpp();
     
+    // Class names from V8 Log
+    void* gameSetNoDamage = findClass("WE.Game", "SetNoDamage");
+    void* playerHurtEvent = findClass("WE.Battle.Logic", "PlayerHurtEvent");
+    void* playerLockHp = findClass("WE.Game", "PlayerLockHp");
+    
+    if (gameSetNoDamage) hookMethodByName(gameSetNoDamage, "ctor", (void*)hook_SetNoDamage, (void**)&orig_SetNoDamage); // Usually constructors or 'Invoke' call these events
+    // NOTE: These are likely Event classes. We need to hook their CONSTRUCTOR or INVOKE method.
+    // The V8 log showed these as classes. Let's try hooking .ctor to see if they get instantiated on damage.
+    
+    if (playerHurtEvent) hookMethodByName(playerHurtEvent, "ctor", (void*)hook_PlayerHurtEvent, (void**)&orig_PlayerHurtEvent);
+    if (playerLockHp) hookMethodByName(playerLockHp, "ctor", (void*)hook_PlayerLockHp, (void**)&orig_PlayerLockHp);
+}
+
+%ctor {
+    NSLog(@"[Acecraft] V9 Loading...");
+    initLogFile();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        loadIl2Cpp();
-        inspectClasses(); // Run the dump immediately on load
+        setupHooks();
         setupMenuButton();
     });
 }
