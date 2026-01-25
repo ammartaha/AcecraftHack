@@ -6,17 +6,13 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V11 - PLAYER LOGIC GOD MODE
+// TWEAK V12 - BRUTE FORCE TRACER
 // ============================================================================
-// Target: WE.Battle.Logic.PlayerLogic
-// Hooks: 
-// - OnAttacked() -> Block it
-// - get_GMNoDamage() -> Force True
-// - DoInvincible() -> Log it
+// Strategy: Hook ANY method that looks kinda like it might be related to HP/Damage.
+// If it logs, we got it.
 
 static NSString *logFilePath = nil;
 static NSFileHandle *logFileHandle = nil;
-static BOOL isGodMode = NO;
 static UIButton *menuButton = nil;
 
 // ============================================================================
@@ -40,12 +36,12 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v11_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v12_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V11: PLAYER LOGIC HOOKS ===");
+    logToFile(@"=== ACECRAFT TRACER V12: BRUTE FORCE ===");
 }
 
 // ============================================================================
@@ -92,41 +88,85 @@ void* findClass(const char* namespaze, const char* className) {
 }
 
 // ============================================================================
-// HOOKS
+// BRUTE FORCE HOOKS
 // ============================================================================
+// We define individual hooks for each target to ensure we capture checking.
+// Most Unity Update/Event logic uses (void* self) or (void* self, void* arg).
 
-// Hook 1: WE.Battle.Logic.PlayerLogic.OnAttacked
-// This is likely the main entry point for damage
-static void (*orig_OnAttacked)(void* self, void* damageInfo);
-void hook_OnAttacked(void* self, void* damageInfo) {
-    if (isGodMode) {
-        logToFile(@"[GOD] OnAttacked BLOCKED!");
-        return; // Complete immunity
-    }
-    logToFile(@"[DMG] OnAttacked called (GodMode OFF)");
-    if (orig_OnAttacked) orig_OnAttacked(self, damageInfo);
+// --- PlayerLogic Hooks ---
+
+static void (*orig_OnHPChange)(void* self);
+void hook_OnHPChange(void* self) {
+    logToFile(@"[TRACE] PlayerLogic.OnHPChange");
+    if (orig_OnHPChange) orig_OnHPChange(self);
 }
 
-// Hook 2: WE.Battle.Logic.PlayerLogic.get_GMNoDamage
-// Built-in Developer God Mode switch?
-static bool (*orig_get_GMNoDamage)(void* self);
-bool hook_get_GMNoDamage(void* self) {
-    if (isGodMode) {
-        // logToFile(@"[GOD] get_GMNoDamage -> Returning TRUE"); // Comment out spam
-        return true;
-    }
-    return orig_get_GMNoDamage ? orig_get_GMNoDamage(self) : false;
+static void (*orig_UpdateHPAttribute)(void* self);
+void hook_UpdateHPAttribute(void* self) {
+    logToFile(@"[TRACE] PlayerLogic.UpdateHPAttribute");
+    if (orig_UpdateHPAttribute) orig_UpdateHPAttribute(self);
 }
 
-// Hook 3: WE.Battle.Logic.PlayerLogic.DoInvincible
-// Trigger invincibility state
-static void (*orig_DoInvincible)(void* self, float duration);
-void hook_DoInvincible(void* self, float duration) {
-    logToFile([NSString stringWithFormat:@"[LOGIC] DoInvincible(%.2f)", duration]);
-    if (orig_DoInvincible) orig_DoInvincible(self, duration);
+static void (*orig_OnCollision)(void* self, void* collision);
+void hook_OnCollision(void* self, void* collision) {
+    logToFile(@"[TRACE] PlayerLogic.OnCollision");
+    if (orig_OnCollision) orig_OnCollision(self, collision);
 }
 
-// Helper to install hook by name (Exact match)
+static void (*orig_OnAttacked)(void* self, void* info);
+void hook_OnAttacked(void* self, void* info) {
+    logToFile(@"[TRACE] PlayerLogic.OnAttacked");
+    if (orig_OnAttacked) orig_OnAttacked(self, info);
+}
+
+static void (*orig_DoInvincible)(void* self, float time);
+void hook_DoInvincible(void* self, float time) {
+    logToFile([NSString stringWithFormat:@"[TRACE] PlayerLogic.DoInvincible(%.2f)", time]);
+    if (orig_DoInvincible) orig_DoInvincible(self, time);
+}
+
+static void (*orig_OnDie)(void* self);
+void hook_OnDie(void* self) {
+    logToFile(@"[TRACE] PlayerLogic.OnDie");
+    if (orig_OnDie) orig_OnDie(self);
+}
+
+static void (*orig_Dead)(void* self);
+void hook_Dead(void* self) {
+    logToFile(@"[TRACE] PlayerLogic.Dead");
+    if (orig_Dead) orig_Dead(self);
+}
+
+static void (*orig_Heal)(void* self, void* amt);
+void hook_Heal(void* self, void* amt) {
+    logToFile(@"[TRACE] PlayerLogic.Heal");
+    if (orig_Heal) orig_Heal(self, amt);
+}
+
+static void (*orig_AddHPShield)(void* self, void* amt);
+void hook_AddHPShield(void* self, void* amt) {
+    logToFile(@"[TRACE] PlayerLogic.AddHPShield");
+    if (orig_AddHPShield) orig_AddHPShield(self, amt);
+}
+
+// --- PlayerController (View) Hooks ---
+
+static void (*orig_OnCurHpChange)(void* self);
+void hook_OnCurHpChange(void* self) {
+    logToFile(@"[TRACE] PlayerController.OnCurHpChange (View Updated)");
+    if (orig_OnCurHpChange) orig_OnCurHpChange(self);
+}
+
+// --- SetNoDamage Hooks ---
+
+static void (*orig_ReceiveTriggerIn)(void* self, void* a, void* b);
+void hook_ReceiveTriggerIn(void* self, void* a, void* b) {
+    logToFile(@"[TRACE] SetNoDamage.ReceiveTriggerIn");
+    if (orig_ReceiveTriggerIn) orig_ReceiveTriggerIn(self, a, b);
+}
+
+
+// Helper to install hook by name (Partial match)
 void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** origPtr) {
     if (!klass || !il2cpp_class_get_methods) return;
     
@@ -135,11 +175,11 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
     while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL) {
         const char* mName = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "";
         
-        if (strcmp(mName, methodName) == 0) {
+        if (strstr(mName, methodName)) {
             void* ptr = *(void**)method;
             if (ptr) {
                 MSHookFunction(ptr, hookFn, origPtr);
-                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s at %p", mName, ptr]);
+                logToFile([NSString stringWithFormat:@"[HOOK] Installed %s", mName]);
                 return;
             }
         }
@@ -156,20 +196,10 @@ void hookMethodByName(void* klass, const char* methodName, void* hookFn, void** 
 
 @implementation ModMenuController
 + (void)showMenu {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V11"
-                                                                   message:@"PlayerLogic Hooks"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Acecraft Hack V12"
+                                                                   message:@"Brute Force Tracer"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    
-    NSString *godModeTitle = isGodMode ? @"God Mode: ON ✅" : @"God Mode: OFF ❌";
-    [alert addAction:[UIAlertAction actionWithTitle:godModeTitle
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * action) {
-        isGodMode = !isGodMode;
-        logToFile([NSString stringWithFormat:@"[UI] God Mode toggled: %d", isGodMode]);
-        [self showMenu];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
-    
+    [alert addAction:[UIAlertAction actionWithTitle:@"Dismiss" style:UIAlertActionStyleCancel handler:nil]];
     UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
     if (rootVC) {
         [rootVC presentViewController:alert animated:YES completion:nil];
@@ -183,28 +213,17 @@ void setupMenuButton() {
         if (!mainWindow) return;
         
         menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        menuButton.frame = CGRectMake(50, 100, 50, 50);
-        menuButton.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.8]; // Red for Final!
-        menuButton.layer.cornerRadius = 25;
-        [menuButton setTitle:@"V11" forState:UIControlStateNormal];
+        menuButton.frame = CGRectMake(50, 50, 60, 60);
+        menuButton.backgroundColor = [[UIColor purpleColor] colorWithAlphaComponent:0.8];
+        menuButton.layer.cornerRadius = 30;
+        [menuButton setTitle:@"V12" forState:UIControlStateNormal];
         
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:menuButton action:@selector(handlePan:)];
-        [menuButton addGestureRecognizer:pan];
         [menuButton addTarget:[ModMenuController class] action:@selector(showMenu) forControlEvents:UIControlEventTouchUpInside];
         
         [mainWindow addSubview:menuButton];
         [mainWindow bringSubviewToFront:menuButton];
     });
 }
-@interface UIButton (Draggable)
-@end
-@implementation UIButton (Draggable)
-- (void)handlePan:(UIPanGestureRecognizer *)sender {
-    CGPoint translation = [sender translationInView:self.superview];
-    self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-    [sender setTranslation:CGPointZero inView:self.superview];
-}
-@end
 
 // ============================================================================
 // SETUP
@@ -212,22 +231,38 @@ void setupMenuButton() {
 void setupHooks() {
     loadIl2Cpp();
     
-    // Validated Class Name from V10 Log
-    void* playerLogic = findClass("WE.Battle.Logic", "PlayerLogic");
+    void* logicClass = findClass("WE.Battle.Logic", "PlayerLogic");
+    void* viewClass = findClass("WE.Battle.View", "PlayerController");
+    void* godClass = findClass("WE.Game", "SetNoDamage");
     
-    if (playerLogic) {
-        logToFile(@"[INFO] Found PlayerLogic class!");
-        hookMethodByName(playerLogic, "OnAttacked", (void*)hook_OnAttacked, (void**)&orig_OnAttacked);
-        hookMethodByName(playerLogic, "get_GMNoDamage", (void*)hook_get_GMNoDamage, (void**)&orig_get_GMNoDamage);
-        hookMethodByName(playerLogic, "DoInvincible", (void*)hook_DoInvincible, (void**)&orig_DoInvincible);
-    } else {
-        logToFile(@"[ERR] PlayerLogic class NOT FOUND!");
+    if (logicClass) {
+        logToFile(@"[INFO] Hooking PlayerLogic...");
+        hookMethodByName(logicClass, "OnHPChange", (void*)hook_OnHPChange, (void**)&orig_OnHPChange);
+        hookMethodByName(logicClass, "UpdateHPAttribute", (void*)hook_UpdateHPAttribute, (void**)&orig_UpdateHPAttribute);
+        hookMethodByName(logicClass, "OnCollision", (void*)hook_OnCollision, (void**)&orig_OnCollision);
+        hookMethodByName(logicClass, "OnAttacked", (void*)hook_OnAttacked, (void**)&orig_OnAttacked);
+        hookMethodByName(logicClass, "DoInvincible", (void*)hook_DoInvincible, (void**)&orig_DoInvincible);
+        hookMethodByName(logicClass, "OnDie", (void*)hook_OnDie, (void**)&orig_OnDie);
+        hookMethodByName(logicClass, "Dead", (void*)hook_Dead, (void**)&orig_Dead);
+        hookMethodByName(logicClass, "Heal", (void*)hook_Heal, (void**)&orig_Heal);
+        hookMethodByName(logicClass, "AddHPShield", (void*)hook_AddHPShield, (void**)&orig_AddHPShield);
+    }
+    
+    if (viewClass) {
+        logToFile(@"[INFO] Hooking PlayerController...");
+        hookMethodByName(viewClass, "OnCurHpChange", (void*)hook_OnCurHpChange, (void**)&orig_OnCurHpChange);
+    }
+    
+    if (godClass) {
+        logToFile(@"[INFO] Hooking SetNoDamage...");
+        hookMethodByName(godClass, "ReceiveTriggerIn", (void*)hook_ReceiveTriggerIn, (void**)&orig_ReceiveTriggerIn);
     }
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V11 Loading...");
+    NSLog(@"[Acecraft] V12 Loading...");
     initLogFile();
+    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupHooks();
         setupMenuButton();
