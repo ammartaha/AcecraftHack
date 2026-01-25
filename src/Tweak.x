@@ -5,7 +5,7 @@
 #import <CydiaSubstrate/CydiaSubstrate.h>
 
 // ============================================================================
-// ADVANCED TRACER V2 - Actually hooks found methods!
+// TRACER V3 - Works with any Unity version!
 // ============================================================================
 
 static NSString *logFilePath = nil;
@@ -38,16 +38,16 @@ void initLogFile() {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     
     logFilePath = [documentsDir stringByAppendingPathComponent:
-                   [NSString stringWithFormat:@"acecraft_v2_%@.txt", timestamp]];
+                   [NSString stringWithFormat:@"acecraft_v3_%@.txt", timestamp]];
     
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
     
-    logToFile(@"=== ACECRAFT TRACER V2 - HOOKS ENABLED ===");
+    logToFile(@"=== ACECRAFT TRACER V3 ===");
 }
 
 // ============================================================================
-// IL2CPP API TYPES
+// IL2CPP API - Multiple methods to get function pointers
 // ============================================================================
 typedef void* (*il2cpp_domain_get_t)(void);
 typedef void* (*il2cpp_domain_get_assemblies_t)(void* domain, size_t* size);
@@ -56,7 +56,10 @@ typedef void* (*il2cpp_class_from_name_t)(void* image, const char* namespaze, co
 typedef void* (*il2cpp_class_get_methods_t)(void* klass, void** iter);
 typedef void* (*il2cpp_class_get_method_from_name_t)(void* klass, const char* name, int argsCount);
 typedef const char* (*il2cpp_method_get_name_t)(void* method);
-typedef void* (*il2cpp_method_get_pointer_t)(void* method);  // THIS IS KEY!
+typedef void* (*il2cpp_runtime_invoke_t)(void* method, void* obj, void** params, void** exc);
+
+// Multiple names for the same function in different Unity versions
+typedef void* (*get_method_pointer_t)(void* method);
 
 static il2cpp_domain_get_t il2cpp_domain_get = NULL;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = NULL;
@@ -65,75 +68,71 @@ static il2cpp_class_from_name_t il2cpp_class_from_name = NULL;
 static il2cpp_class_get_methods_t il2cpp_class_get_methods = NULL;
 static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = NULL;
 static il2cpp_method_get_name_t il2cpp_method_get_name = NULL;
-static il2cpp_method_get_pointer_t il2cpp_method_get_pointer = NULL;
+static get_method_pointer_t get_method_pointer = NULL;
 
 // ============================================================================
-// ORIGINAL FUNCTION POINTERS
+// METHOD INFO STRUCT - Read pointer directly from struct!
+// In il2cpp, MethodInfo has the pointer at the very first field
+// ============================================================================
+typedef struct Il2CppMethodInfo {
+    void* methodPointer;  // First field is always the function pointer!
+    void* invoker_method;
+    const char* name;
+    // ... more fields
+} Il2CppMethodInfo;
+
+void* getMethodPointer(void* methodInfo) {
+    if (!methodInfo) return NULL;
+    
+    // Method 1: Try the exported function
+    if (get_method_pointer) {
+        return get_method_pointer(methodInfo);
+    }
+    
+    // Method 2: Read directly from struct (first field is usually the pointer)
+    Il2CppMethodInfo* info = (Il2CppMethodInfo*)methodInfo;
+    return info->methodPointer;
+}
+
+// ============================================================================
+// HOOK FUNCTIONS
 // ============================================================================
 static void (*orig_BulletManager_SpawnBullet)(void* self, void* bulletData) = NULL;
 static void (*orig_Bullet_SetHp)(void* self, void* hp) = NULL;
-static void (*orig_Player_Hit)(void* self) = NULL;
-static void (*orig_Player_TakeDamage)(void* self, void* damage) = NULL;
 static void* (*orig_BulletManager_Spawn)(void* self, void* data) = NULL;
 
-// ============================================================================
-// HOOK FUNCTIONS - These will log when called!
-// ============================================================================
 void hook_BulletManager_SpawnBullet(void* self, void* bulletData) {
-    logToFile([NSString stringWithFormat:@">>> SpawnBullet! self=%p bulletData=%p", self, bulletData]);
+    logToFile([NSString stringWithFormat:@">>> SpawnBullet! data=%p", bulletData]);
     hookCount++;
-    if (orig_BulletManager_SpawnBullet) {
-        orig_BulletManager_SpawnBullet(self, bulletData);
-    }
+    if (orig_BulletManager_SpawnBullet) orig_BulletManager_SpawnBullet(self, bulletData);
 }
 
 void hook_Bullet_SetHp(void* self, void* hp) {
-    logToFile([NSString stringWithFormat:@">>> SetHp! self=%p hp=%p", self, hp]);
+    logToFile([NSString stringWithFormat:@">>> Bullet.SetHp! hp=%p", hp]);
     hookCount++;
-    if (orig_Bullet_SetHp) {
-        orig_Bullet_SetHp(self, hp);
-    }
-}
-
-void hook_Player_Hit(void* self) {
-    logToFile([NSString stringWithFormat:@">>> Player.Hit! self=%p", self]);
-    hookCount++;
-    if (orig_Player_Hit) {
-        orig_Player_Hit(self);
-    }
-}
-
-void hook_Player_TakeDamage(void* self, void* damage) {
-    logToFile([NSString stringWithFormat:@">>> Player.TakeDamage! self=%p damage=%p", self, damage]);
-    hookCount++;
-    if (orig_Player_TakeDamage) {
-        orig_Player_TakeDamage(self, damage);
-    }
+    if (orig_Bullet_SetHp) orig_Bullet_SetHp(self, hp);
 }
 
 void* hook_BulletManager_Spawn(void* self, void* data) {
-    logToFile([NSString stringWithFormat:@">>> BulletManager.Spawn! self=%p", self]);
+    logToFile(@">>> BulletManager.Spawn!");
     hookCount++;
-    if (orig_BulletManager_Spawn) {
-        return orig_BulletManager_Spawn(self, data);
-    }
+    if (orig_BulletManager_Spawn) return orig_BulletManager_Spawn(self, data);
     return NULL;
 }
 
 // ============================================================================
-// FIND AND HOOK A METHOD
+// FIND AND HOOK
 // ============================================================================
-bool findAndHookMethod(const char* namespaze, const char* className, const char* methodName, 
-                       int argCount, void* hookFunc, void** origFunc) {
-    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_method_get_pointer) {
-        return false;
-    }
+bool findAndHook(const char* namespaze, const char* className, const char* methodName, 
+                 int argCount, void* hookFunc, void** origFunc) {
+    if (!il2cpp_domain_get || !il2cpp_class_from_name) return false;
     
     void* domain = il2cpp_domain_get();
-    if (!domain) return false;
+    if (!domain) { logToFile(@"No domain"); return false; }
     
     size_t size = 0;
     void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    logToFile([NSString stringWithFormat:@"Found %zu assemblies", size]);
     
     for (size_t i = 0; i < size; i++) {
         void* image = il2cpp_assembly_get_image(assemblies[i]);
@@ -143,31 +142,27 @@ bool findAndHookMethod(const char* namespaze, const char* className, const char*
         if (klass) {
             void* method = il2cpp_class_get_method_from_name(klass, methodName, argCount);
             if (method) {
-                // GET THE ACTUAL FUNCTION POINTER!
-                void* funcPtr = il2cpp_method_get_pointer(method);
-                if (funcPtr) {
+                void* funcPtr = getMethodPointer(method);
+                
+                logToFile([NSString stringWithFormat:@"Found %s.%s.%s method=%p ptr=%p", 
+                           namespaze, className, methodName, method, funcPtr]);
+                
+                if (funcPtr && funcPtr != method) {
                     MSHookFunction(funcPtr, hookFunc, origFunc);
-                    logToFile([NSString stringWithFormat:@"HOOKED %s.%s.%s at %p", 
-                               namespaze, className, methodName, funcPtr]);
+                    logToFile([NSString stringWithFormat:@"✓ HOOKED at %p", funcPtr]);
                     return true;
-                } else {
-                    logToFile([NSString stringWithFormat:@"Found %s.%s.%s but couldn't get pointer", 
-                               namespaze, className, methodName]);
                 }
             }
         }
     }
-    
     return false;
 }
 
 // ============================================================================
-// LIST ALL METHODS IN A CLASS (for discovery)
+// LIST ALL METHODS
 // ============================================================================
-void listClassMethods(const char* namespaze, const char* className) {
-    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_methods) {
-        return;
-    }
+void listMethods(const char* namespaze, const char* className) {
+    if (!il2cpp_domain_get || !il2cpp_class_from_name) return;
     
     void* domain = il2cpp_domain_get();
     if (!domain) return;
@@ -181,119 +176,107 @@ void listClassMethods(const char* namespaze, const char* className) {
         
         void* klass = il2cpp_class_from_name(image, namespaze, className);
         if (klass) {
-            logToFile([NSString stringWithFormat:@"=== Methods in %s.%s ===", namespaze, className]);
+            logToFile([NSString stringWithFormat:@"=== %s.%s methods ===", namespaze, className]);
             
             void* iter = NULL;
             void* method;
-            int count = 0;
-            while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL && count < 50) {
-                const char* name = il2cpp_method_get_name(method);
-                if (name) {
-                    logToFile([NSString stringWithFormat:@"  - %s", name]);
-                }
-                count++;
+            int n = 0;
+            while ((method = il2cpp_class_get_methods(klass, &iter)) != NULL && n < 30) {
+                const char* name = il2cpp_method_get_name ? il2cpp_method_get_name(method) : "?";
+                void* ptr = getMethodPointer(method);
+                logToFile([NSString stringWithFormat:@"  %s -> %p", name, ptr]);
+                n++;
             }
             return;
         }
     }
-    
-    logToFile([NSString stringWithFormat:@"Class %s.%s not found", namespaze, className]);
+    logToFile([NSString stringWithFormat:@"Class %s.%s NOT FOUND", namespaze, className]);
 }
 
 // ============================================================================
-// LOAD IL2CPP FUNCTIONS
+// LOAD IL2CPP
 // ============================================================================
-bool loadIl2CppFunctions() {
-    void* handle = dlopen(NULL, RTLD_NOW);
+void loadIl2Cpp() {
+    void* h = dlopen(NULL, RTLD_NOW);
     
-    il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(handle, "il2cpp_domain_get");
-    il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(handle, "il2cpp_domain_get_assemblies");
-    il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(handle, "il2cpp_assembly_get_image");
-    il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(handle, "il2cpp_class_from_name");
-    il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(handle, "il2cpp_class_get_methods");
-    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(handle, "il2cpp_class_get_method_from_name");
-    il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(handle, "il2cpp_method_get_name");
-    il2cpp_method_get_pointer = (il2cpp_method_get_pointer_t)dlsym(handle, "il2cpp_method_get_pointer");
+    il2cpp_domain_get = (il2cpp_domain_get_t)dlsym(h, "il2cpp_domain_get");
+    il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t)dlsym(h, "il2cpp_domain_get_assemblies");
+    il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t)dlsym(h, "il2cpp_assembly_get_image");
+    il2cpp_class_from_name = (il2cpp_class_from_name_t)dlsym(h, "il2cpp_class_from_name");
+    il2cpp_class_get_methods = (il2cpp_class_get_methods_t)dlsym(h, "il2cpp_class_get_methods");
+    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t)dlsym(h, "il2cpp_class_get_method_from_name");
+    il2cpp_method_get_name = (il2cpp_method_get_name_t)dlsym(h, "il2cpp_method_get_name");
     
-    if (il2cpp_domain_get) logToFile(@"Found il2cpp_domain_get");
-    if (il2cpp_method_get_pointer) logToFile(@"Found il2cpp_method_get_pointer (CRITICAL!)");
+    // Try multiple names for getting method pointer
+    get_method_pointer = (get_method_pointer_t)dlsym(h, "il2cpp_method_get_pointer");
+    if (!get_method_pointer) get_method_pointer = (get_method_pointer_t)dlsym(h, "il2cpp_method_get_function_pointer");
+    if (!get_method_pointer) get_method_pointer = (get_method_pointer_t)dlsym(h, "il2cpp_resolve_icall");
     
-    return il2cpp_domain_get && il2cpp_method_get_pointer;
+    logToFile([NSString stringWithFormat:@"il2cpp_domain_get: %p", il2cpp_domain_get]);
+    logToFile([NSString stringWithFormat:@"il2cpp_class_from_name: %p", il2cpp_class_from_name]);
+    logToFile([NSString stringWithFormat:@"il2cpp_class_get_methods: %p", il2cpp_class_get_methods]);
+    logToFile([NSString stringWithFormat:@"get_method_pointer: %p (will use struct if NULL)", get_method_pointer]);
 }
 
 // ============================================================================
-// SETUP HOOKS
+// SETUP
 // ============================================================================
-void setupHooks() {
+void setup() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        logToFile(@"Loading il2cpp functions...");
+        logToFile(@"Loading il2cpp...");
+        loadIl2Cpp();
         
-        if (!loadIl2CppFunctions()) {
-            logToFile(@"ERROR: Failed to load il2cpp functions!");
+        if (!il2cpp_domain_get) {
+            logToFile(@"FATAL: il2cpp_domain_get not found!");
             return;
         }
         
-        logToFile(@"Hooking game methods...");
+        logToFile(@"Discovering classes...");
         
-        // Hook BulletManager methods (namespace "BB")
-        findAndHookMethod("BB", "BulletManager", "SpawnBullet", 1, 
-                          (void*)hook_BulletManager_SpawnBullet, (void**)&orig_BulletManager_SpawnBullet);
+        // List methods to see what's available
+        listMethods("BB", "Player");
+        listMethods("BB", "BulletManager");  
+        listMethods("BB", "Bullet");
+        listMethods("BB", "BulletData");
+        listMethods("", "Player");  // Try without namespace too
         
-        findAndHookMethod("BB", "BulletManager", "Spawn", 1, 
-                          (void*)hook_BulletManager_Spawn, (void**)&orig_BulletManager_Spawn);
+        logToFile(@"Attempting hooks...");
         
-        // Hook Bullet methods
-        findAndHookMethod("BB", "Bullet", "SetHp", 1, 
-                          (void*)hook_Bullet_SetHp, (void**)&orig_Bullet_SetHp);
+        // Try to hook
+        findAndHook("BB", "BulletManager", "SpawnBullet", 1, 
+                    (void*)hook_BulletManager_SpawnBullet, (void**)&orig_BulletManager_SpawnBullet);
+        findAndHook("BB", "BulletManager", "Spawn", 1, 
+                    (void*)hook_BulletManager_Spawn, (void**)&orig_BulletManager_Spawn);
+        findAndHook("BB", "Bullet", "SetHp", 1, 
+                    (void*)hook_Bullet_SetHp, (void**)&orig_Bullet_SetHp);
         
-        // Hook Player methods (try different namespaces)
-        findAndHookMethod("BB", "Player", "Hit", 0, 
-                          (void*)hook_Player_Hit, (void**)&orig_Player_Hit);
-        
-        findAndHookMethod("", "Player", "Hit", 0, 
-                          (void*)hook_Player_Hit, (void**)&orig_Player_Hit);
-        
-        findAndHookMethod("BB", "Player", "TakeDamage", 1, 
-                          (void*)hook_Player_TakeDamage, (void**)&orig_Player_TakeDamage);
-        
-        // List methods in key classes to discover what's available
-        logToFile(@"Discovering class methods...");
-        listClassMethods("BB", "Player");
-        listClassMethods("BB", "BulletManager");
-        listClassMethods("BB", "Bullet");
-        
-        logToFile(@"=== HOOKS INSTALLED - PLAY THE GAME! ===");
-        logToFile([NSString stringWithFormat:@"Log file: %@", logFilePath]);
+        logToFile(@"=== SETUP COMPLETE ===");
+        logToFile([NSString stringWithFormat:@"Log: %@", logFilePath]);
     });
 }
 
 // ============================================================================
 // UI
 // ============================================================================
-static UILabel *statusLabel = nil;
+static UILabel *label = nil;
 
 void setupUI() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *window = [[UIApplication sharedApplication] keyWindow];
+        UIWindow *w = [[UIApplication sharedApplication] keyWindow];
+        label = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 180, 50)];
+        label.backgroundColor = [[UIColor orangeColor] colorWithAlphaComponent:0.9];
+        label.textColor = [UIColor blackColor];
+        label.font = [UIFont boldSystemFontOfSize:10];
+        label.numberOfLines = 2;
+        label.text = @"V3 Loading...";
+        label.textAlignment = NSTextAlignmentCenter;
+        label.layer.cornerRadius = 6;
+        label.clipsToBounds = YES;
+        [w addSubview:label];
         
-        statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 50, 200, 60)];
-        statusLabel.backgroundColor = [[UIColor purpleColor] colorWithAlphaComponent:0.8];
-        statusLabel.textColor = [UIColor whiteColor];
-        statusLabel.font = [UIFont boldSystemFontOfSize:11];
-        statusLabel.numberOfLines = 3;
-        statusLabel.text = @"🎮 TRACER V2\nWaiting...";
-        statusLabel.layer.cornerRadius = 8;
-        statusLabel.clipsToBounds = YES;
-        statusLabel.textAlignment = NSTextAlignmentCenter;
-        
-        [window addSubview:statusLabel];
-        
-        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
-            statusLabel.text = [NSString stringWithFormat:@"🎮 TRACER V2\nHooks: %d\nCalls: %d", 
-                               hookCount, callCount];
-            if (hookCount > 0) {
-                statusLabel.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.8];
-            }
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+            label.text = [NSString stringWithFormat:@"V3 Hooks:%d Calls:%d", hookCount, callCount];
+            if (hookCount > 0) label.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.9];
         }];
     });
 }
@@ -302,8 +285,8 @@ void setupUI() {
 // CONSTRUCTOR
 // ============================================================================
 %ctor {
-    NSLog(@"[ACE] === TRACER V2 LOADING ===");
+    NSLog(@"[ACE] V3 Loading");
     initLogFile();
     setupUI();
-    setupHooks();
+    setup();
 }
