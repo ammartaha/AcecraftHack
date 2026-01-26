@@ -20,7 +20,7 @@ static NSFileHandle *logFileHandle = nil;
 
 // Toggles
 static BOOL isGodModeRef = YES;
-static BOOL isOneHitKill = NO;
+
 
 // UI Elements
 static UIButton *floatingBtn;
