@@ -6,13 +6,13 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V21 - SAFETY SNIFFER (LOGGING ONLY - NO CRASHES)
+// TWEAK V23 - DEBUG LOG SNIFFER & IGAMEGOD READY
 // ============================================================================
 /*
    Changes:
-   1. LOGIC: Verbose Sniffer. We log *EVERYTHING*.
-   2. REMOVED: All keyword filters.
-   3. ADDED: Null string logging.
+   1. STRATEGY: Hook `UnityEngine.Debug.Log` instead of SendMessage.
+   2. GOAL: Capture game's internal logs to find logic flow.
+   3. UI: Updated title to reflect "Logger".
 */
 
 static NSString *logFilePath = nil;
@@ -46,14 +46,14 @@ void initLogFile() {
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
-    logFilePath = [documentsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"acecraft_v21_%@.txt", timestamp]];
+    logFilePath = [documentsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"acecraft_v23_%@.txt", timestamp]];
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
-    logToFile(@"=== ACECRAFT V22: VERBOSE SNIFFER ===");
+    logToFile(@"=== ACECRAFT V23: DEBUG LOG SNIFFER ===");
 }
 
 // ============================================================================
-// IL2CPP TYPES & HELPERS (CRASH FIX)
+// IL2CPP TYPES & HELPERS
 // ============================================================================
 typedef void* (*il2cpp_string_chars_t)(void* str);
 typedef int (*il2cpp_string_length_t)(void* str);
@@ -73,19 +73,18 @@ char* GetStringFromIl2CppString(void* strObj) {
     
     // Safety 1: Check Length
     int len = il2cpp_string_length(strObj);
-    if (len <= 0 || len > 1024) return NULL; // Ignore huge or empty strings
+    if (len <= 0 || len > 2048) return NULL; 
     
     // Safety 2: Get Chars
     uint16_t* chars = (uint16_t*)il2cpp_string_chars(strObj);
     if (!chars) return NULL;
     
     // Safety 3: Conversion
-    static char buffer[1025];
+    static char buffer[2049];
     int i = 0;
-    for (i = 0; i < len && i < 1024; i++) {
-        // Simple ASCII filter
+    for (i = 0; i < len && i < 2048; i++) {
         uint16_t c = chars[i];
-        if (c < 32 || c > 126) buffer[i] = '?'; // Non-printable
+        if (c < 32 || c > 126) buffer[i] = '?';
         else buffer[i] = (char)c;
     }
     buffer[i] = 0;
@@ -94,30 +93,30 @@ char* GetStringFromIl2CppString(void* strObj) {
 
 
 // ============================================================================
-// HOOKS: THE SNIFFER
+// HOOKS: DEBUG LOGGER
 // ============================================================================
 
-// UnityEngine.GameObject.SendMessage(string methodName, object value, SendMessageOptions options)
-static void (*orig_SendMessage)(void* self, void* methodName, void* value, int options);
+// UnityEngine.Debug.Log(object message)
+static void (*orig_DebugLog)(void* message);
 
-void hook_SendMessage(void* self, void* methodName, void* value, int options) {
-    if (methodName) {
-        char* nameC = GetStringFromIl2CppString(methodName);
-        if (nameC) {
-             // V22: NO FILTER. LOG EVERYTHING.
-             logToFile([NSString stringWithFormat:@"[MSG] %s", nameC]);
-        } else {
-             logToFile(@"[MSG] [NULL STRING]");
+void hook_DebugLog(void* message) {
+    if (message) {
+        // In Unity, Debug.Log takes an Object. It calls ToString().
+        // If it passes a String directly, it's an Il2CppString.
+        // We will assume it's a string for now or try to cast.
+        // Risk: value types boxed?
+        // Let's try GetString.
+        
+        char* msgC = GetStringFromIl2CppString(message);
+        if (msgC) {
+             logToFile([NSString stringWithFormat:@"[UNITY] %s", msgC]);
         }
-    } else {
-         logToFile(@"[MSG] [NULL METHODNAME]");
     }
     
-    // ALWAYS call original
-    if (orig_SendMessage) orig_SendMessage(self, methodName, value, options);
+    if (orig_DebugLog) orig_DebugLog(message);
 }
 
-// FORWARD DECLARATIONS (Required for class_addMethod)
+// FORWARD DECLARATIONS
 void handlePanImpl(id self, SEL _cmd, UIPanGestureRecognizer *sender);
 void sw1ChangedImpl(id self, SEL _cmd, UISwitch *sender);
 void toggleMenu(id self, SEL _cmd);
@@ -151,7 +150,7 @@ void setupUI() {
         mainWindow = [UIApplication sharedApplication].keyWindow;
         if (!mainWindow) return;
 
-        // 1. Floating Button (Glass)
+        // 1. Floating Button
         floatingBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingBtn.frame = CGRectMake(50, 50, 50, 50);
         floatingBtn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
@@ -166,17 +165,15 @@ void setupUI() {
         [floatingBtn addGestureRecognizer:pan];
         [floatingBtn addTarget:floatingBtn action:@selector(menuBtnTapped) forControlEvents:UIControlEventTouchUpInside];
         
-        // Button Logic wrapper
-        class_addMethod([UIButton class], @selector(handlePan:), (IMP)handlePanImpl, "v@:@");
+        class_addMethod([UIButton class], @selector(handlePan:), (IMP)handlePanImpl, "v@:@:@"); // Fix types? No, v@:@ is standard for id, SEL, id
         class_addMethod([UIButton class], @selector(menuBtnTapped), (IMP)toggleMenu, "v@:");
 
         [mainWindow addSubview:floatingBtn];
 
-        // 2. Menu View (Glassmorphism)
+        // 2. Menu View
         menuView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 280, 250)];
         menuView.center = mainWindow.center;
         
-        // Blur Background
         UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
         blurEffectView = [[UIVisualEffectView alloc] initWithEffect:blur];
         blurEffectView.frame = menuView.bounds;
@@ -186,23 +183,22 @@ void setupUI() {
         blurEffectView.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.2].CGColor;
         [menuView addSubview:blurEffectView];
         
-        // Header
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, 280, 30)];
-        title.text = @"ACECRAFT SNIFFER";
+        title.text = @"DEBUG LOGGER";
         title.textColor = [UIColor whiteColor];
         title.textAlignment = NSTextAlignmentCenter;
         title.font = [UIFont boldSystemFontOfSize:20];
         [menuView addSubview:title];
         
-        // Switch 1: Sniffer Mode
+        // Switch 1: Log Toggle
         UISwitch *sw1 = [[UISwitch alloc] initWithFrame:CGRectMake(200, 70, 50, 30)];
         sw1.on = isGodModeRef;
         [sw1 addTarget:sw1 action:@selector(sw1Changed:) forControlEvents:UIControlEventValueChanged];
-        class_addMethod([UISwitch class], @selector(sw1Changed:), (IMP)sw1ChangedImpl, "v@:@");
+        class_addMethod([UISwitch class], @selector(sw1Changed:), (IMP)sw1ChangedImpl, "v@:@:@");
         [menuView addSubview:sw1];
         
         UILabel *lbl1 = [[UILabel alloc] initWithFrame:CGRectMake(20, 70, 150, 30)];
-        lbl1.text = @"Log Sniffer";
+        lbl1.text = @"Log Unity Debug";
         lbl1.textColor = [UIColor cyanColor];
         [menuView addSubview:lbl1];
         
@@ -222,42 +218,36 @@ void handlePanImpl(id self, SEL _cmd, UIPanGestureRecognizer *sender) {
 
 void sw1ChangedImpl(id self, SEL _cmd, UISwitch *sender) {
     isGodModeRef = sender.on;
-    logToFile([NSString stringWithFormat:@"[UI] Sniffer Toggled: %d", isGodModeRef]);
+    logToFile([NSString stringWithFormat:@"[UI] Logging Toggled: %d", isGodModeRef]);
 }
 
 
 // ============================================================================
 // SETUP HOOKS
 // ============================================================================
-void findAndHookSendMessage() {
+void findAndHookDebugLog() {
     loadIl2Cpp();
     
     void* handle = dlopen(NULL, RTLD_NOW);
     void* (*il2cpp_resolve_icall)(const char*) = dlsym(handle, "il2cpp_resolve_icall");
     
     if (il2cpp_resolve_icall) {
-        void* addr = il2cpp_resolve_icall("UnityEngine.GameObject::SendMessage");
+        void* addr = il2cpp_resolve_icall("UnityEngine.Debug::Log(System.Object)");
         if (addr) {
-             MSHookFunction(addr, (void*)hook_SendMessage, (void**)&orig_SendMessage);
-             logToFile(@"[HOOK] Hooked UnityEngine.GameObject::SendMessage");
+             MSHookFunction(addr, (void*)hook_DebugLog, (void**)&orig_DebugLog);
+             logToFile(@"[HOOK] Hooked UnityEngine.Debug::Log");
         } else {
-             addr = il2cpp_resolve_icall("UnityEngine.GameObject::SendMessage(System.String,System.Object,UnityEngine.SendMessageOptions)");
-             if (addr) {
-                  MSHookFunction(addr, (void*)hook_SendMessage, (void**)&orig_SendMessage);
-                  logToFile(@"[HOOK] Hooked SendMessage (Long Sig)");
-             } else {
-                 logToFile(@"[ERR] Failed to resolve SendMessage icall");
-             }
+             logToFile(@"[ERR] Failed to resolve Debug.Log icall");
         }
     }
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V22 Loading...");
+    NSLog(@"[Acecraft] V23 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         setupUI();
-        findAndHookSendMessage();
+        findAndHookDebugLog();
     });
 }
