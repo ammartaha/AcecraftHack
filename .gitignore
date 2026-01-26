@@ -3,12 +3,34 @@
 *.deb
 *.dylib
 *.zip
+*.rar
 
 # Tools and Dumps
 tools/
 extracted/
 dump.cs
 *.dat
+decompiled_output/
+temp_ue/
+
+# Game Files (not needed for build)
+acecraft files/
+
+# Documentation (keep only README)
+*.md
+!README.md
+
+# Logs
+logs/
+*.log
+*.txt
+
+# Scripts
+*.bat
+
+# Agent/Claude files
+.agent/
+.claude/
 
 # System
 .DS_Store
