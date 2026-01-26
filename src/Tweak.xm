@@ -135,10 +135,11 @@ void setupHacks() {
     }
     logToFile(@"[INIT] Il2CppResolver initialized successfully");
 
-    // 2. Attach to domain
+    // 2. Get domain (attachment happens automatically during Initialize)
     Unity::il2cppDomain* domain = IL2CPP::Domain::Get();
-    IL2CPP::Domain::Attach(domain);
-    logToFile(@"[INIT] Attached to Il2Cpp domain");
+    // Note: Domain::Attach() doesn't exist in this IL2CPP resolver
+    // Domain is already accessible after Initialize()
+    logToFile(@"[INIT] Domain retrieved successfully");
 
     // 3. Find PlayerLogic class
     logToFile(@"[SEARCH] Looking for WE.Battle.Logic.PlayerLogic...");
