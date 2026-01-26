@@ -101,13 +101,13 @@ void startGodModeLoop() {
                         // Set GMNoDamage = true
                         bool trueValue = true;
                         void* args[] = { &trueValue };
-                        IL2CPP::Method::Invoke(setGMNoDamageMethod, playerInstance, args, nullptr);
+                        IL2CPP::Invoke(setGMNoDamageMethod, playerInstance, args, nullptr);
 
                         // Verify it was set (optional logging)
                         static int logCounter = 0;
                         if (logCounter++ % 100 == 0) { // Log every 100 iterations
                             bool currentValue = false;
-                            IL2CPP::Method::Invoke(getGMNoDamageMethod, playerInstance, nullptr, &currentValue);
+                            IL2CPP::Invoke(getGMNoDamageMethod, playerInstance, nullptr, &currentValue);
                             logToFile([NSString stringWithFormat:@"[GOD MODE] GMNoDamage = %d", currentValue]);
                         }
                     }
