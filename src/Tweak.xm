@@ -9,7 +9,7 @@
 #include "IL2CPP_Resolver.hpp"
 
 // ============================================================================
-// TWEAK V24 - DYNAMIC RESOLVER (IOS-Il2CppResolver)
+// TWEAK V25.2 - API FIX (ITERATOR)
 // ============================================================================
 /*
    Changes:
@@ -114,11 +114,11 @@ void setupDynamicHooks() {
     // API: Class::GetMethod(name, argsCount)
     // We will iterate methods if needed, but let's try standard GetMethod.
     
-    std::vector<Unity::il2cppMethodInfo*> methods = IL2CPP::Class::GetMethods(debugClass);
+    // 4. Find Method: Log(object) using Iterator Pattern
+    void* iter = nullptr;
     void* targetAddr = NULL;
     
-    for (auto method : methods) {
-        // filter by name "Log" and param count 1
+    while (Unity::il2cppMethodInfo* method = IL2CPP::Class::GetMethods(debugClass, &iter)) {
         if (strcmp(method->name, "Log") == 0 && method->parameters_count == 1) {
              targetAddr = (void*)method->methodPointer;
              logToFile([NSString stringWithFormat:@"[FOUND] Debug.Log(obj) at %p", targetAddr]);
