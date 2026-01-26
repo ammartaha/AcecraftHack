@@ -10,9 +10,9 @@
 // ============================================================================
 /*
    Changes:
-   1. FIXED: Crash in GetStringFromIl2CppString (Now checks length & null).
-   2. LOGIC: Sniffer Mode. We log ALL messages to find the *real* damage keyword.
-      We do NOT block anything yet (Safety first).
+   1. LOGIC: Verbose Sniffer. We log *EVERYTHING*.
+   2. REMOVED: All keyword filters.
+   3. ADDED: Null string logging.
 */
 
 static NSString *logFilePath = nil;
@@ -49,7 +49,7 @@ void initLogFile() {
     logFilePath = [documentsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"acecraft_v21_%@.txt", timestamp]];
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
-    logToFile(@"=== ACECRAFT V21: SAFETY SNIFFER ===");
+    logToFile(@"=== ACECRAFT V22: VERBOSE SNIFFER ===");
 }
 
 // ============================================================================
@@ -101,24 +101,19 @@ char* GetStringFromIl2CppString(void* strObj) {
 static void (*orig_SendMessage)(void* self, void* methodName, void* value, int options);
 
 void hook_SendMessage(void* self, void* methodName, void* value, int options) {
-    if (methodName && isGodModeRef) {
-        // Attempt to read string
-        // If this crashes, our GetString is still bad.
-        // But with limits, it should be safe.
+    if (methodName) {
         char* nameC = GetStringFromIl2CppString(methodName);
         if (nameC) {
-            // SNIFFER MODE: Log interesting events
-            // We want to see EVERYTHING related to Damage
-            if (strstr(nameC, "Damage") || strstr(nameC, "Attacked") || 
-                strstr(nameC, "Hit") || strstr(nameC, "Health") ||
-                strstr(nameC, "Trigger")) {
-                
-                logToFile([NSString stringWithFormat:@"[SNIFF] SendMessage: %s", nameC]);
-            }
+             // V22: NO FILTER. LOG EVERYTHING.
+             logToFile([NSString stringWithFormat:@"[MSG] %s", nameC]);
+        } else {
+             logToFile(@"[MSG] [NULL STRING]");
         }
+    } else {
+         logToFile(@"[MSG] [NULL METHODNAME]");
     }
     
-    // ALWAYS call original (No blocking in V21 to prevent crash)
+    // ALWAYS call original
     if (orig_SendMessage) orig_SendMessage(self, methodName, value, options);
 }
 
@@ -258,7 +253,7 @@ void findAndHookSendMessage() {
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V21 Loading...");
+    NSLog(@"[Acecraft] V22 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
