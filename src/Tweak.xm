@@ -154,24 +154,24 @@ void setupHacks() {
     void* iter = nullptr;
 
     while (Unity::il2cppMethodInfo* method = IL2CPP::Class::GetMethods(playerLogicClass, &iter)) {
-        const char* methodName = method->name;
+        const char* methodName = method->m_pName;
 
         // Find set_GMNoDamage
-        if (strcmp(methodName, "set_GMNoDamage") == 0 && method->parameters_count == 1) {
+        if (strcmp(methodName, "set_GMNoDamage") == 0 && method->m_uArgsCount == 1) {
             setGMNoDamageMethod = method;
-            logToFile([NSString stringWithFormat:@"[FOUND] set_GMNoDamage at %p", method->methodPointer]);
+            logToFile([NSString stringWithFormat:@"[FOUND] set_GMNoDamage at %p", method->m_pMethodPointer]);
         }
 
         // Find get_GMNoDamage
-        if (strcmp(methodName, "get_GMNoDamage") == 0 && method->parameters_count == 0) {
+        if (strcmp(methodName, "get_GMNoDamage") == 0 && method->m_uArgsCount == 0) {
             getGMNoDamageMethod = method;
-            logToFile([NSString stringWithFormat:@"[FOUND] get_GMNoDamage at %p", method->methodPointer]);
+            logToFile([NSString stringWithFormat:@"[FOUND] get_GMNoDamage at %p", method->m_pMethodPointer]);
         }
 
         // Find set_CurExp
-        if (strcmp(methodName, "set_CurExp") == 0 && method->parameters_count == 1) {
+        if (strcmp(methodName, "set_CurExp") == 0 && method->m_uArgsCount == 1) {
             setCurExpMethod = method;
-            void* methodAddr = (void*)method->methodPointer;
+            void* methodAddr = (void*)method->m_pMethodPointer;
             logToFile([NSString stringWithFormat:@"[FOUND] set_CurExp at %p", methodAddr]);
 
             // Hook set_CurExp for XP multiplier
@@ -182,9 +182,9 @@ void setupHacks() {
         }
 
         // Find get_CurExp
-        if (strcmp(methodName, "get_CurExp") == 0 && method->parameters_count == 0) {
+        if (strcmp(methodName, "get_CurExp") == 0 && method->m_uArgsCount == 0) {
             getCurExpMethod = method;
-            logToFile([NSString stringWithFormat:@"[FOUND] get_CurExp at %p", method->methodPointer]);
+            logToFile([NSString stringWithFormat:@"[FOUND] get_CurExp at %p", method->m_pMethodPointer]);
         }
     }
 
