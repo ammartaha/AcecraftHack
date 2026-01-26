@@ -6,13 +6,13 @@
 #import "Utils.h"
 
 // ============================================================================
-// TWEAK V20 - THE MODERN AGE (GLASSMORPHISM & ENGINE FIREWALL)
+// TWEAK V21 - SAFETY SNIFFER (LOGGING ONLY - NO CRASHES)
 // ============================================================================
 /*
-   Design:
-   1. UI: Glassmorphism Floating Button + Centered Menu (Spring Animations).
-   2. LOGIC: Hook `GameObject.SendMessage` to BLOCK "OnAttacked" / "DoDamage".
-      This stops HybridCLR from ever knowing a hit occurred.
+   Changes:
+   1. FIXED: Crash in GetStringFromIl2CppString (Now checks length & null).
+   2. LOGIC: Sniffer Mode. We log ALL messages to find the *real* damage keyword.
+      We do NOT block anything yet (Safety first).
 */
 
 static NSString *logFilePath = nil;
@@ -21,7 +21,6 @@ static NSFileHandle *logFileHandle = nil;
 // Toggles
 static BOOL isGodModeRef = YES;
 static BOOL isOneHitKill = NO;
-
 
 // UI Elements
 static UIButton *floatingBtn;
@@ -47,38 +46,47 @@ void initLogFile() {
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
-    logFilePath = [documentsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"acecraft_v20_%@.txt", timestamp]];
+    logFilePath = [documentsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"acecraft_v21_%@.txt", timestamp]];
     [[NSFileManager defaultManager] createFileAtPath:logFilePath contents:nil attributes:nil];
     logFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
-    logToFile(@"=== ACECRAFT V20: GLASS UI & ENGINE FIREWALL ===");
+    logToFile(@"=== ACECRAFT V21: SAFETY SNIFFER ===");
 }
 
 // ============================================================================
-// IL2CPP TYPES
+// IL2CPP TYPES & HELPERS (CRASH FIX)
 // ============================================================================
 typedef void* (*il2cpp_string_chars_t)(void* str);
+typedef int (*il2cpp_string_length_t)(void* str);
 
 static il2cpp_string_chars_t il2cpp_string_chars = NULL;
+static il2cpp_string_length_t il2cpp_string_length = NULL;
 
 void loadIl2Cpp() {
     void* h = dlopen(NULL, RTLD_NOW);
     if (!h) return;
     il2cpp_string_chars = (il2cpp_string_chars_t)dlsym(h, "il2cpp_string_chars");
+    il2cpp_string_length = (il2cpp_string_length_t)dlsym(h, "il2cpp_string_length");
 }
 
 char* GetStringFromIl2CppString(void* strObj) {
-    if (!strObj || !il2cpp_string_chars) return NULL;
-    // Il2Cpp string chars are UTF-16 usually, but for simple ascii we can cast fast or convert
-    // Correct way:
+    if (!strObj || !il2cpp_string_chars || !il2cpp_string_length) return NULL;
+    
+    // Safety 1: Check Length
+    int len = il2cpp_string_length(strObj);
+    if (len <= 0 || len > 1024) return NULL; // Ignore huge or empty strings
+    
+    // Safety 2: Get Chars
     uint16_t* chars = (uint16_t*)il2cpp_string_chars(strObj);
     if (!chars) return NULL;
     
-    // Simple conversion (naive)
-    static char buffer[256];
+    // Safety 3: Conversion
+    static char buffer[1025];
     int i = 0;
-    while (chars[i] && i < 255) {
-        buffer[i] = (char)chars[i];
-        i++;
+    for (i = 0; i < len && i < 1024; i++) {
+        // Simple ASCII filter
+        uint16_t c = chars[i];
+        if (c < 32 || c > 126) buffer[i] = '?'; // Non-printable
+        else buffer[i] = (char)c;
     }
     buffer[i] = 0;
     return buffer;
@@ -86,36 +94,31 @@ char* GetStringFromIl2CppString(void* strObj) {
 
 
 // ============================================================================
-// HOOKS: ENGINE FIREWALL
+// HOOKS: THE SNIFFER
 // ============================================================================
 
 // UnityEngine.GameObject.SendMessage(string methodName, object value, SendMessageOptions options)
 static void (*orig_SendMessage)(void* self, void* methodName, void* value, int options);
 
 void hook_SendMessage(void* self, void* methodName, void* value, int options) {
-    if (!methodName) {
-        if (orig_SendMessage) orig_SendMessage(self, methodName, value, options);
-        return;
-    }
-
-    char* nameC = GetStringFromIl2CppString(methodName);
-    if (nameC) {
-        // FILTER: The Firewall
-        if (isGodModeRef) {
-            if (strstr(nameC, "Damage") || strstr(nameC, "Attacked") || strstr(nameC, "Hit")) {
-                // Determine if it's Player related?
-                // For V20, we block globally to be safe. "God Mode" means NO damage for anyone? 
-                // Mostly aimed at player.
-                // We can't easily check 'self' name without resolved calls.
-                // RISK: Might make enemies invincible too. But usually enemies take damage via "TakeDamage" or similar.
-                // Let's Log and Block.
+    if (methodName && isGodModeRef) {
+        // Attempt to read string
+        // If this crashes, our GetString is still bad.
+        // But with limits, it should be safe.
+        char* nameC = GetStringFromIl2CppString(methodName);
+        if (nameC) {
+            // SNIFFER MODE: Log interesting events
+            // We want to see EVERYTHING related to Damage
+            if (strstr(nameC, "Damage") || strstr(nameC, "Attacked") || 
+                strstr(nameC, "Hit") || strstr(nameC, "Health") ||
+                strstr(nameC, "Trigger")) {
                 
-                logToFile([NSString stringWithFormat:@"[BLOCKED] SendMessage: %s", nameC]);
-                return; // BLOCK CALL
+                logToFile([NSString stringWithFormat:@"[SNIFF] SendMessage: %s", nameC]);
             }
         }
     }
     
+    // ALWAYS call original (No blocking in V21 to prevent crash)
     if (orig_SendMessage) orig_SendMessage(self, methodName, value, options);
 }
 
@@ -190,13 +193,13 @@ void setupUI() {
         
         // Header
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, 280, 30)];
-        title.text = @"ACECRAFT GOD";
+        title.text = @"ACECRAFT SNIFFER";
         title.textColor = [UIColor whiteColor];
         title.textAlignment = NSTextAlignmentCenter;
         title.font = [UIFont boldSystemFontOfSize:20];
         [menuView addSubview:title];
         
-        // Switch 1: God Mode
+        // Switch 1: Sniffer Mode
         UISwitch *sw1 = [[UISwitch alloc] initWithFrame:CGRectMake(200, 70, 50, 30)];
         sw1.on = isGodModeRef;
         [sw1 addTarget:sw1 action:@selector(sw1Changed:) forControlEvents:UIControlEventValueChanged];
@@ -204,19 +207,9 @@ void setupUI() {
         [menuView addSubview:sw1];
         
         UILabel *lbl1 = [[UILabel alloc] initWithFrame:CGRectMake(20, 70, 150, 30)];
-        lbl1.text = @"God Mode";
+        lbl1.text = @"Log Sniffer";
         lbl1.textColor = [UIColor cyanColor];
         [menuView addSubview:lbl1];
-
-        // Switch 2: One Hit (Placeholder)
-        UISwitch *sw2 = [[UISwitch alloc] initWithFrame:CGRectMake(200, 120, 50, 30)];
-        sw2.on = isOneHitKill;
-        [menuView addSubview:sw2];
-        
-        UILabel *lbl2 = [[UILabel alloc] initWithFrame:CGRectMake(20, 120, 150, 30)];
-        lbl2.text = @"One Hit Kill";
-        lbl2.textColor = [UIColor redColor];
-        [menuView addSubview:lbl2];
         
         menuView.hidden = YES;
         [mainWindow addSubview:menuView];
@@ -234,7 +227,7 @@ void handlePanImpl(id self, UIPanGestureRecognizer *sender) {
 
 void sw1ChangedImpl(id self, UISwitch *sender) {
     isGodModeRef = sender.on;
-    logToFile([NSString stringWithFormat:@"[UI] God Mode Toggled: %d", isGodModeRef]);
+    logToFile([NSString stringWithFormat:@"[UI] Sniffer Toggled: %d", isGodModeRef]);
 }
 
 
@@ -244,19 +237,6 @@ void sw1ChangedImpl(id self, UISwitch *sender) {
 void findAndHookSendMessage() {
     loadIl2Cpp();
     
-    // We need to find "UnityEngine.GameObject.SendMessage"
-    // Since we don't have the offset, let's use dlsym on "SendMessage" symbols in UnityFramework
-    // Or scan for it? 
-    // Wait, V20 plan assumes we use `dlsym` patterns.
-    // UnityFramework exports are usually hidden.
-    
-    // Fallback: Hook UnitySendMessage (Native -> Script) just in case?
-    // No, we need Script -> Script (SendMessage).
-    
-    // For now, let's use the ADDRESS from dumper if available, or a pattern match.
-    // Given the constraints and previous findings, we will try to resolve it via `il2cpp_resolve_icall` if possible.
-    // "UnityEngine.GameObject::SendMessage"
-    
     void* handle = dlopen(NULL, RTLD_NOW);
     void* (*il2cpp_resolve_icall)(const char*) = dlsym(handle, "il2cpp_resolve_icall");
     
@@ -264,13 +244,12 @@ void findAndHookSendMessage() {
         void* addr = il2cpp_resolve_icall("UnityEngine.GameObject::SendMessage");
         if (addr) {
              MSHookFunction(addr, (void*)hook_SendMessage, (void**)&orig_SendMessage);
-             logToFile(@"[HOOK] Hooked UnityEngine.GameObject::SendMessage via icall resolve");
+             logToFile(@"[HOOK] Hooked UnityEngine.GameObject::SendMessage");
         } else {
-             // Try alternate signature
              addr = il2cpp_resolve_icall("UnityEngine.GameObject::SendMessage(System.String,System.Object,UnityEngine.SendMessageOptions)");
              if (addr) {
                   MSHookFunction(addr, (void*)hook_SendMessage, (void**)&orig_SendMessage);
-                  logToFile(@"[HOOK] Hooked SendMessage (Long Sig) via icall resolve");
+                  logToFile(@"[HOOK] Hooked SendMessage (Long Sig)");
              } else {
                  logToFile(@"[ERR] Failed to resolve SendMessage icall");
              }
@@ -279,7 +258,7 @@ void findAndHookSendMessage() {
 }
 
 %ctor {
-    NSLog(@"[Acecraft] V20 Loading...");
+    NSLog(@"[Acecraft] V21 Loading...");
     initLogFile();
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
