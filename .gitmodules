@@ -1,0 +1,3 @@
+[submodule "src/Il2CppResolver"]
+	path = src/Il2CppResolver
+	url = https://github.com/Batchhh/IOS-Il2cppResolver.git
