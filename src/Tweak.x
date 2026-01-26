@@ -123,8 +123,8 @@ void hook_SendMessage(void* self, void* methodName, void* value, int options) {
 }
 
 // FORWARD DECLARATIONS (Required for class_addMethod)
-void handlePanImpl(id self, UIPanGestureRecognizer *sender);
-void sw1ChangedImpl(id self, UISwitch *sender);
+void handlePanImpl(id self, SEL _cmd, UIPanGestureRecognizer *sender);
+void sw1ChangedImpl(id self, SEL _cmd, UISwitch *sender);
 void toggleMenu(id self, SEL _cmd);
 
 // ============================================================================
@@ -217,7 +217,7 @@ void setupUI() {
 }
 
 // ObjC Implementation Helpers
-void handlePanImpl(id self, UIPanGestureRecognizer *sender) {
+void handlePanImpl(id self, SEL _cmd, UIPanGestureRecognizer *sender) {
     if (sender.state == UIGestureRecognizerStateChanged) {
         CGPoint translation = [sender translationInView:mainWindow];
         sender.view.center = CGPointMake(sender.view.center.x + translation.x, sender.view.center.y + translation.y);
@@ -225,7 +225,7 @@ void handlePanImpl(id self, UIPanGestureRecognizer *sender) {
     }
 }
 
-void sw1ChangedImpl(id self, UISwitch *sender) {
+void sw1ChangedImpl(id self, SEL _cmd, UISwitch *sender) {
     isGodModeRef = sender.on;
     logToFile([NSString stringWithFormat:@"[UI] Sniffer Toggled: %d", isGodModeRef]);
 }
