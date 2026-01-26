@@ -98,17 +98,26 @@ void startGodModeLoop() {
                     Unity::il2cppObject* playerInstance = Unity::Object::FindObject(playerLogicClass);
 
                     if (playerInstance) {
-                        // Set GMNoDamage = true
-                        bool trueValue = true;
-                        void* args[] = { &trueValue };
-                        IL2CPP::Invoke(setGMNoDamageMethod, playerInstance, args, nullptr);
+                        // Set GMNoDamage = true using direct method pointer
+                        if (setGMNoDamageMethod && setGMNoDamageMethod->m_pMethodPointer) {
+                            typedef void (*SetBoolMethod_t)(void*, bool);
+                            SetBoolMethod_t setGMNoDamage = reinterpret_cast<SetBoolMethod_t>(setGMNoDamageMethod->m_pMethodPointer);
+                            setGMNoDamage(playerInstance, true);
+                        } else {
+                            logToFile(@"[GOD MODE] setGMNoDamage method pointer missing");
+                        }
 
                         // Verify it was set (optional logging)
                         static int logCounter = 0;
                         if (logCounter++ % 100 == 0) { // Log every 100 iterations
-                            bool currentValue = false;
-                            IL2CPP::Invoke(getGMNoDamageMethod, playerInstance, nullptr, &currentValue);
-                            logToFile([NSString stringWithFormat:@"[GOD MODE] GMNoDamage = %d", currentValue]);
+                            if (getGMNoDamageMethod && getGMNoDamageMethod->m_pMethodPointer) {
+                                typedef bool (*GetBoolMethod_t)(void*);
+                                GetBoolMethod_t getGMNoDamage = reinterpret_cast<GetBoolMethod_t>(getGMNoDamageMethod->m_pMethodPointer);
+                                bool currentValue = getGMNoDamage(playerInstance);
+                                logToFile([NSString stringWithFormat:@"[GOD MODE] GMNoDamage = %d", currentValue]);
+                            } else {
+                                logToFile(@"[GOD MODE] getGMNoDamage method pointer missing");
+                            }
                         }
                     }
                 }
@@ -334,12 +343,12 @@ void handlePanImpl(id self, SEL _cmd, UIPanGestureRecognizer *sender) {
 
 void sw1ChangedImpl(id self, SEL _cmd, UISwitch *sender) {
     isGodModeEnabled = sender.on;
-    logToFile([NSString stringWithFormat:@"[UI] God Mode: %@", isGodModeEnabled ? @"ON" : @"OFF"]);
+    logToFile([NSString stringWithFormat:@"[UI] God Mode: %@", isGodModeEnabled ? @"ON" : @"OFF"]);  
 }
 
 void sw2ChangedImpl(id self, SEL _cmd, UISwitch *sender) {
     isXPMultiplierEnabled = sender.on;
-    logToFile([NSString stringWithFormat:@"[UI] XP Multiplier: %@", isXPMultiplierEnabled ? @"ON" : @"OFF"]);
+    logToFile([NSString stringWithFormat:@"[UI] XP Multiplier: %@", isXPMultiplierEnabled ? @"ON" : @"OFF"]);  
 }
 
 // ============================================================================
